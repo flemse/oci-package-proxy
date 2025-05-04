@@ -15,6 +15,7 @@ import (
 
 var (
 	refName      string
+	inputPath    string
 	outPath      string
 	cleanOutPath bool
 )
@@ -27,11 +28,12 @@ type IndexFile struct {
 }
 
 type IndexEntry struct {
-	MediaType   string            `json:"mediaType"`
-	Size        int64             `json:"size"`
-	Digest      string            `json:"digest"`
-	Platform    *Platform         `json:"platform,omitempty"`
-	Annotations map[string]string `json:"annotations,omitempty"`
+	MediaType    string            `json:"mediaType"`
+	Size         int64             `json:"size"`
+	Digest       string            `json:"digest"`
+	Platform     *Platform         `json:"platform,omitempty"`
+	ArtifactType string            `json:"artifactType,omitempty"`
+	Annotations  map[string]string `json:"annotations,omitempty"`
 }
 
 type LayerEntry struct {
@@ -67,7 +69,6 @@ var generateCmd = &cobra.Command{
 	Use:   "generate",
 	Short: "Generate OCI manifest list for zip files in the dist directory",
 	Run: func(cmd *cobra.Command, args []string) {
-		distDir := "dist"
 
 		if cleanOutPath && outPath != "" {
 			// Clean the output directory if it exists
@@ -102,7 +103,7 @@ var generateCmd = &cobra.Command{
 		innerImageIndex.MediaType = "application/vnd.oci.image.index.v1+json"
 
 		//createdAt := time.Now().Format(time.RFC3339)
-		err := filepath.WalkDir(distDir, func(path string, d os.DirEntry, err error) error {
+		err := filepath.WalkDir(inputPath, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -180,6 +181,10 @@ var generateCmd = &cobra.Command{
 					log.Printf("Failed to write manifest file %s: %v", configPath, err)
 					return nil
 				}
+				annotations := map[string]string{
+					"original-filename":    d.Name(),
+					"original-file-digest": layerDigest,
+				}
 				manifest := Manifest{
 					SchemaVersion: 2,
 					MediaType:     "application/vnd.oci.image.manifest.v1+json",
@@ -195,9 +200,7 @@ var generateCmd = &cobra.Command{
 							Digest:    "sha256:" + layerDigest,
 						},
 					},
-					Annotations: map[string]string{
-						"org.opencontainers.image.original-filename": d.Name(),
-					},
+					Annotations: annotations,
 				}
 
 				manifestData, err := json.MarshalIndent(manifest, "", "  ")
@@ -213,18 +216,8 @@ var generateCmd = &cobra.Command{
 					log.Printf("Failed to write manifest file %s: %v", manifestPath, err)
 					return nil
 				}
-				// Add entry to the manifest list
-				outerImageIndex.Manifests = append(outerImageIndex.Manifests, IndexEntry{
-					MediaType: "application/vnd.oci.image.manifest.v1+json",
-					Size:      int64(len(manifestData)),
-					Digest:    "sha256:" + manifestDigestHex,
-					Platform: &Platform{
-						OS:           osName,
-						Architecture: arch,
-					},
-				})
 
-				innerImageIndex.Manifests = append(innerImageIndex.Manifests, IndexEntry{
+				entry := IndexEntry{
 					MediaType: "application/vnd.oci.image.manifest.v1+json",
 					Size:      int64(len(manifestData)),
 					Digest:    "sha256:" + manifestDigestHex,
@@ -232,7 +225,12 @@ var generateCmd = &cobra.Command{
 						OS:           osName,
 						Architecture: arch,
 					},
-				})
+					Annotations:  annotations,
+					ArtifactType: "application/vnd.tf.provider.v1+json",
+				}
+				// Add entry to the manifest list
+				outerImageIndex.Manifests = append(outerImageIndex.Manifests, entry)
+				innerImageIndex.Manifests = append(innerImageIndex.Manifests, entry)
 			}
 
 			return nil
@@ -284,6 +282,7 @@ var generateCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(generateCmd)
 	generateCmd.Flags().StringVar(&refName, "ref-name", "", "Reference name for the OCI layout")
+	generateCmd.Flags().StringVar(&inputPath, "input", "dist", "Input path for the zip files")
 	generateCmd.Flags().StringVar(&outPath, "output", "oci-layout", "Output path for the tar.gz file")
 	generateCmd.Flags().BoolVar(&cleanOutPath, "clean", false, "Clean the output path before generating")
 }
