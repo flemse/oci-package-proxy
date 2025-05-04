@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"os"
@@ -31,7 +30,7 @@ type IndexEntry struct {
 	MediaType   string            `json:"mediaType"`
 	Size        int64             `json:"size"`
 	Digest      string            `json:"digest"`
-	Platform    Platform          `json:"platform"`
+	Platform    *Platform         `json:"platform,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
@@ -91,9 +90,16 @@ var generateCmd = &cobra.Command{
 			log.Fatalf("Failed to create oci-layout file: %v", err)
 		}
 
-		var imageIndex IndexFile
-		imageIndex.SchemaVersion = 2
-		imageIndex.MediaType = "application/vnd.oci.image.index.v1+json"
+		var outerImageIndex IndexFile
+		outerImageIndex.SchemaVersion = 2
+		outerImageIndex.MediaType = "application/vnd.oci.image.index.v1+json"
+		outerImageIndex.Annotations = map[string]string{
+			"org.opencontainers.image.ref.name": refName,
+		}
+
+		var innerImageIndex IndexFile
+		innerImageIndex.SchemaVersion = 2
+		innerImageIndex.MediaType = "application/vnd.oci.image.index.v1+json"
 
 		//createdAt := time.Now().Format(time.RFC3339)
 		err := filepath.WalkDir(distDir, func(path string, d os.DirEntry, err error) error {
@@ -208,16 +214,23 @@ var generateCmd = &cobra.Command{
 					return nil
 				}
 				// Add entry to the manifest list
-				imageIndex.Manifests = append(imageIndex.Manifests, IndexEntry{
+				outerImageIndex.Manifests = append(outerImageIndex.Manifests, IndexEntry{
 					MediaType: "application/vnd.oci.image.manifest.v1+json",
 					Size:      int64(len(manifestData)),
 					Digest:    "sha256:" + manifestDigestHex,
-					Platform: Platform{
+					Platform: &Platform{
 						OS:           osName,
 						Architecture: arch,
 					},
-					Annotations: map[string]string{
-						"org.opencontainers.image.ref.name": fmt.Sprintf("%s-%s-%s", refName, osName, arch),
+				})
+
+				innerImageIndex.Manifests = append(innerImageIndex.Manifests, IndexEntry{
+					MediaType: "application/vnd.oci.image.manifest.v1+json",
+					Size:      int64(len(manifestData)),
+					Digest:    "sha256:" + manifestDigestHex,
+					Platform: &Platform{
+						OS:           osName,
+						Architecture: arch,
 					},
 				})
 			}
@@ -229,6 +242,27 @@ var generateCmd = &cobra.Command{
 			log.Fatalf("Error walking the dist directory: %v", err)
 		}
 
+		innerIndexData, err := json.Marshal(innerImageIndex)
+		if err != nil {
+			log.Fatalf("Failed to marshal inner image index: %v", err)
+		}
+
+		innerIndexDigest := sha256.Sum256(innerIndexData)
+		innerIndexDigestHex := hex.EncodeToString(innerIndexDigest[:])
+		innerIndexPath := filepath.Join(blobsDir, innerIndexDigestHex)
+		if err := os.WriteFile(innerIndexPath, innerIndexData, os.ModePerm); err != nil {
+			log.Fatalf("Failed to write manifest file %s: %v", innerIndexPath, err)
+		}
+
+		outerImageIndex.Manifests = append(outerImageIndex.Manifests, IndexEntry{
+			MediaType: "application/vnd.oci.image.index.v1+json",
+			Size:      int64(len(innerIndexData)),
+			Digest:    "sha256:" + innerIndexDigestHex,
+			Annotations: map[string]string{
+				"org.opencontainers.image.ref.name": refName,
+			},
+		})
+
 		// Write the manifest list to index.json
 		indexPath := filepath.Join(outPath, "index.json")
 		indexFile, err := os.Create(indexPath)
@@ -239,7 +273,7 @@ var generateCmd = &cobra.Command{
 
 		encoder := json.NewEncoder(indexFile)
 		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(imageIndex); err != nil {
+		if err := encoder.Encode(outerImageIndex); err != nil {
 			log.Fatalf("Failed to write index.json: %v", err)
 		}
 

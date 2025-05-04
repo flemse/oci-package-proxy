@@ -19,7 +19,7 @@ docker build --pull --platform linux/amd64 -t localhost:5001/hello-world:v1-linu
 docker push localhost:5001/hello-world:v1-linux-arm64
 docker push localhost:5001/hello-world:v1-linux-amd64
 
-docker manifest create localhost:5001/hello-world:v1 \
+docker manifest create --insecure localhost:5001/hello-world:v1 \
   localhost:5001/hello-world:v1-linux-arm64 \
   localhost:5001/hello-world:v1-linux-amd64
 docker manifest push localhost:5001/hello-world:v1
