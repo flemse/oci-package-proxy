@@ -1,29 +1,30 @@
 package cmd
 
 import (
-	"archive/tar"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 )
 
 var (
-	refName string
-	outPath string
+	refName      string
+	outPath      string
+	cleanOutPath bool
 )
 
 type IndexFile struct {
-	SchemaVersion int          `json:"schemaVersion"`
-	MediaType     string       `json:"mediaType"`
-	Manifests     []IndexEntry `json:"manifests"`
+	SchemaVersion int               `json:"schemaVersion"`
+	MediaType     string            `json:"mediaType"`
+	Manifests     []IndexEntry      `json:"manifests"`
+	Annotations   map[string]string `json:"annotations,omitempty"`
 }
 
 type IndexEntry struct {
@@ -31,7 +32,7 @@ type IndexEntry struct {
 	Size        int64             `json:"size"`
 	Digest      string            `json:"digest"`
 	Platform    Platform          `json:"platform"`
-	Annotations map[string]string `json:"annotations"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 type LayerEntry struct {
@@ -40,10 +41,22 @@ type LayerEntry struct {
 	Digest    string `json:"digest"`
 }
 
+type Descriptor struct {
+	MediaType string `json:"mediaType"`
+	Digest    string `json:"digest"`
+	Size      int64  `json:"size"`
+}
+
 type Manifest struct {
-	SchemaVersion int          `json:"schemaVersion"`
-	MediaType     string       `json:"mediaType"`
-	Layers        []LayerEntry `json:"layers"`
+	SchemaVersion int               `json:"schemaVersion"`
+	MediaType     string            `json:"mediaType"`
+	Config        Descriptor        `json:"config"`
+	Layers        []Descriptor      `json:"layers"`
+	Annotations   map[string]string `json:"annotations,omitempty"`
+}
+type ManifestConfig struct {
+	OS           string `json:"os"`
+	Architecture string `json:"architecture"`
 }
 
 type Platform struct {
@@ -56,6 +69,15 @@ var generateCmd = &cobra.Command{
 	Short: "Generate OCI manifest list for zip files in the dist directory",
 	Run: func(cmd *cobra.Command, args []string) {
 		distDir := "dist"
+
+		if cleanOutPath && outPath != "" {
+			// Clean the output directory if it exists
+			if _, err := os.Stat(outPath); err == nil {
+				if err := os.RemoveAll(outPath); err != nil {
+					log.Fatalf("Failed to clean output path: %v", err)
+				}
+			}
+		}
 		blobsDir := filepath.Join(outPath, "blobs", "sha256")
 
 		// Create the OCI layout directory structure
@@ -73,7 +95,7 @@ var generateCmd = &cobra.Command{
 		imageIndex.SchemaVersion = 2
 		imageIndex.MediaType = "application/vnd.oci.image.index.v1+json"
 
-		createdAt := time.Now().Format(time.RFC3339)
+		//createdAt := time.Now().Format(time.RFC3339)
 		err := filepath.WalkDir(distDir, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -136,15 +158,39 @@ var generateCmd = &cobra.Command{
 				osName := parts[len(parts)-2]
 				arch := strings.TrimSuffix(parts[len(parts)-1], ".zip")
 
+				config := ManifestConfig{
+					OS:           osName,
+					Architecture: arch,
+				}
+				configData, err := json.Marshal(config)
+				if err != nil {
+					log.Printf("Failed to marshal config for %s: %v", d.Name(), err)
+					return nil
+				}
+				configDigest := sha256.Sum256(configData)
+				configDigestHex := hex.EncodeToString(configDigest[:])
+				configPath := filepath.Join(blobsDir, configDigestHex)
+				if err := os.WriteFile(configPath, configData, os.ModePerm); err != nil {
+					log.Printf("Failed to write manifest file %s: %v", configPath, err)
+					return nil
+				}
 				manifest := Manifest{
 					SchemaVersion: 2,
 					MediaType:     "application/vnd.oci.image.manifest.v1+json",
-					Layers: []LayerEntry{
+					Config: Descriptor{
+						MediaType: "application/vnd.oci.image.config.v1+json",
+						Digest:    "sha256:" + configDigestHex,
+						Size:      int64(len(configData)),
+					},
+					Layers: []Descriptor{
 						{
 							MediaType: "application/vnd.oci.image.layer.v1.tar+gzip",
 							Size:      info.Size(),
 							Digest:    "sha256:" + layerDigest,
 						},
+					},
+					Annotations: map[string]string{
+						"org.opencontainers.image.original-filename": d.Name(),
 					},
 				}
 
@@ -171,9 +217,7 @@ var generateCmd = &cobra.Command{
 						Architecture: arch,
 					},
 					Annotations: map[string]string{
-						"org.opencontainers.image.original-filename": d.Name(),
-						"org.opencontainers.image.created":           createdAt,
-						"org.opencontainers.image.ref.name":          refName,
+						"org.opencontainers.image.ref.name": fmt.Sprintf("%s-%s-%s", refName, osName, arch),
 					},
 				})
 			}
@@ -200,10 +244,6 @@ var generateCmd = &cobra.Command{
 		}
 
 		log.Printf("OCI layout created at %s", outPath)
-
-		if err := createTar(outPath, outPath+".tar"); err != nil {
-			log.Fatalf("Failed to create tar.gz: %v", err)
-		}
 	},
 }
 
@@ -211,64 +251,5 @@ func init() {
 	rootCmd.AddCommand(generateCmd)
 	generateCmd.Flags().StringVar(&refName, "ref-name", "", "Reference name for the OCI layout")
 	generateCmd.Flags().StringVar(&outPath, "output", "oci-layout", "Output path for the tar.gz file")
-}
-
-func createTar(sourceDir, outputTarGz string) error {
-	// Create the output tar.gz file
-	outFile, err := os.Create(outputTarGz)
-	if err != nil {
-		return err
-	}
-	defer outFile.Close()
-
-	// Create a tar writer
-	tarWriter := tar.NewWriter(outFile)
-	defer tarWriter.Close()
-
-	// Walk through the source directory
-	err = filepath.Walk(sourceDir, func(file string, fi os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Get the relative path
-		relPath, err := filepath.Rel(sourceDir, file)
-		if err != nil {
-			return err
-		}
-
-		// Skip the root directory
-		if relPath == "." {
-			return nil
-		}
-
-		// Create a tar header
-		header, err := tar.FileInfoHeader(fi, fi.Name())
-		if err != nil {
-			return err
-		}
-		header.Name = relPath
-
-		// Write the header to the tar archive
-		if err := tarWriter.WriteHeader(header); err != nil {
-			return err
-		}
-
-		// If it's a file, write its content
-		if !fi.IsDir() {
-			fileContent, err := os.Open(file)
-			if err != nil {
-				return err
-			}
-			defer fileContent.Close()
-
-			if _, err := io.Copy(tarWriter, fileContent); err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-
-	return err
+	generateCmd.Flags().BoolVar(&cleanOutPath, "clean", false, "Clean the output path before generating")
 }
