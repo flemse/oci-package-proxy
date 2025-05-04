@@ -2,11 +2,9 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"testing"
 
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/oci"
@@ -44,24 +42,32 @@ func TestManifest(t *testing.T) {
 	assert.NotNil(t, desc)
 }
 
-func TestFetch(t *testing.T) {
+func TestShasumsFromIndex(t *testing.T) {
 	ctx := context.Background()
 	host := "localhost:5001"
 	repoName := "appmgmt"
 	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", host, repoName))
 	repo.PlainHTTP = true
 	assert.NoError(t, err)
+	oci := NewStore(repo)
 
-	r, _, err := repo.FetchReference(ctx, "v1")
+	shasums, err := oci.Shasums(ctx, "v1")
 	assert.NoError(t, err)
-	assert.NotNil(t, r)
-	rc, err := repo.Fetch(ctx, r)
+	assert.NotEmpty(t, shasums)
+}
+
+func TestDownloadUrlsFromIndex(t *testing.T) {
+	ctx := context.Background()
+	host := "localhost:5001"
+	repoName := "appmgmt"
+	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", host, repoName))
+	repo.PlainHTTP = true
 	assert.NoError(t, err)
-	defer rc.Close()
-	var s ocispec.Index
-	err = json.NewDecoder(rc).Decode(&s)
+	oci := NewStore(repo)
+
+	urls, err := oci.DownloadUrls(ctx, "v1")
 	assert.NoError(t, err)
-	assert.NotNil(t, s)
+	assert.NotEmpty(t, urls)
 }
 
 func TestGetOciStore(t *testing.T) {

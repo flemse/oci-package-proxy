@@ -1,8 +1,8 @@
 terraform {
   required_providers {
-    aws = {
+    applicationmanagement = {
       source  = "localhost:8080/novus/applicationmanagement"
-      version = "0.0.10"
+      version = "0.3.0"
     }
   }
 }

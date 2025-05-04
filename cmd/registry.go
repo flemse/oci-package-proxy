@@ -1,15 +1,18 @@
 package cmd
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 
 	"fth-test-app/internal/devcert"
 	"fth-test-app/pkg/registries/terraform"
-	"github.com/spf13/cobra"
+	"fth-test-app/pkg/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/spf13/cobra"
+	"oras.land/oras-go/v2/registry/remote"
 )
 
 // registryCmd represents the registry command
@@ -28,7 +31,16 @@ var registryCmd = &cobra.Command{
 		r := chi.NewRouter()
 		r.Use(middleware.RequestID)
 		r.Use(middleware.Logger)
-		terraform.SetupRoutes(r)
+
+		host := "localhost:5001"
+		repoName := "novus/applicationmanagement"
+		repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", host, repoName))
+		repo.PlainHTTP = true
+
+		reg := terraform.Registry{
+			OCI: store.NewStore(repo),
+		}
+		reg.SetupRoutes(r)
 
 		addr := net.JoinHostPort("", port)
 		log.Printf("Terraform Registry Server running on %s", addr)

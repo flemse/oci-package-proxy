@@ -1,16 +1,11 @@
 package terraform
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 
+	"fth-test-app/pkg/store"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -71,7 +66,7 @@ type DownloadResponse struct {
 	Protocols           []string `json:"protocols"`
 	Shasum              string   `json:"shasum"`
 	ShasumsURL          string   `json:"shasums_url"`
-	ShasumsSignatureURL string   `json:"shasums_signature_url"`
+	ShasumsSignatureURL string   `json:"shasums_signature_url,omitempty"`
 }
 
 var (
@@ -80,21 +75,25 @@ var (
 	}
 	Providers = []Provider{
 		{Name: "example/aws", Version: []string{"2.1.0", "2.1.1"}},
-		{Name: "novus/applicationmanagement", Version: []string{"0.0.10"}},
+		{Name: "novus/applicationmanagement", Version: []string{"0.0.10", "0.3.0"}},
 	}
 )
 
-func SetupRoutes(mux chi.Router) {
-	mux.HandleFunc("/v1/modules/", HandleModules)
-	mux.HandleFunc("/v1/providers/{namespace}/{type}", providerBase)
-	mux.HandleFunc("/v1/providers/{namespace}/{type}/versions", providerVersions)
-	mux.HandleFunc("/v1/providers/{namespace}/{type}/{version}/download/{os}/{arch}", providerDownload)
-	mux.HandleFunc("/dl/{namespace}/{type}/{version}/{os}/{arch}", providerDownloadFile)
-	mux.HandleFunc("/v1/login", HandleLogin)
-	mux.HandleFunc("/.well-known/terraform.json", HandleWellKnownTerraform)
+type Registry struct {
+	OCI *store.Store
 }
 
-func HandleModules(w http.ResponseWriter, r *http.Request) {
+func (re *Registry) SetupRoutes(mux chi.Router) {
+	mux.HandleFunc("/v1/modules/", re.HandleModules)
+	mux.HandleFunc("/v1/providers/{namespace}/{type}", re.providerBase)
+	mux.HandleFunc("/v1/providers/{namespace}/{type}/versions", re.providerVersions)
+	mux.HandleFunc("/v1/providers/{namespace}/{type}/{version}/download/{os}/{arch}", re.providerDownload)
+	mux.HandleFunc("/_providers/{namespace}/{type}/{version}/{os}/{arch}/shasum", re.providerShasum)
+	mux.HandleFunc("/v1/login", re.HandleLogin)
+	mux.HandleFunc("/.well-known/terraform.json", re.HandleWellKnownTerraform)
+}
+
+func (re *Registry) HandleModules(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -112,7 +111,7 @@ func HandleModules(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Module not found", http.StatusNotFound)
 }
 
-func providerBase(w http.ResponseWriter, r *http.Request) {
+func (re *Registry) providerBase(w http.ResponseWriter, r *http.Request) {
 	// Handle metadata: /v1/providers/:namespace/:type
 	ns := r.PathValue("namespace")
 	t := r.PathValue("type")
@@ -127,55 +126,48 @@ func providerBase(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-func providerDownloadFile(w http.ResponseWriter, r *http.Request) {
-	ns := r.PathValue("namespace")
-	t := r.PathValue("type")
+func (re *Registry) providerShasum(w http.ResponseWriter, r *http.Request) {
 	version := r.PathValue("version")
-	osName := r.PathValue("os")
-	arch := r.PathValue("arch")
 
-	path := filepath.Join("data", ns, t, version, osName, arch, "provider.zip")
-
-	http.ServeFile(w, r, path)
-	return
-}
-
-func providerDownload(w http.ResponseWriter, r *http.Request) {
-	ns := r.PathValue("namespace")
-	t := r.PathValue("type")
-	version := r.PathValue("version")
-	osName := r.PathValue("os")
-	arch := r.PathValue("arch")
-
-	path := filepath.Join("data", ns, t, fmt.Sprintf("terraform-provider-%s_%s_%s_%s.zip", t, version, osName, arch))
-
-	f, err := os.Open(path)
+	shasums, err := re.OCI.Shasums(r.Context(), "v"+version)
 	if err != nil {
-		log.Printf("Error opening file: %v", err)
-		http.Error(w, "File not found", http.StatusNotFound)
 		return
 	}
-	s := sha256.New()
-	if _, err := io.Copy(s, f); err != nil {
-		log.Printf("Error copying to hash : %v", err)
-		http.Error(w, "File not found", http.StatusNotFound)
+
+	w.Header().Set("Content-Type", "application/text")
+	w.Write([]byte(shasums))
+
+}
+
+func (re *Registry) providerDownload(w http.ResponseWriter, r *http.Request) {
+	ns := r.PathValue("namespace")
+	t := r.PathValue("type")
+	version := r.PathValue("version")
+	osName := r.PathValue("os")
+	arch := r.PathValue("arch")
+
+	info, err := re.OCI.DownloadUrlForPlatform(r.Context(), "v"+version, osName, arch)
+	if err != nil {
+		log.Printf("Error getting download URL: %v", err)
+		http.Error(w, "Error getting download URL", http.StatusInternalServerError)
 		return
 	}
 
 	resp := DownloadResponse{
 		Arch:        arch,
-		DownloadURL: fmt.Sprintf("dl/%s/%s/%s/%s/%s", ns, t, version, osName, arch),
-		Filename:    fmt.Sprintf("terraform-provider-%s_%s_%s_%s.zip", t, version, osName, arch),
+		DownloadURL: info.Url,
+		Filename:    info.Filename,
 		OS:          osName,
 		Protocols:   []string{"5.0"},
-		Shasum:      hex.EncodeToString(s.Sum(nil)),
+		Shasum:      info.Digest,
+		ShasumsURL:  "/_providers/" + ns + "/" + t + "/" + version + "/" + osName + "/" + arch + "/shasum",
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 	return
 }
 
-func providerVersions(w http.ResponseWriter, r *http.Request) {
+func (re *Registry) providerVersions(w http.ResponseWriter, r *http.Request) {
 	ns := r.PathValue("namespace")
 	t := r.PathValue("type")
 	// Handle versions: /v1/providers/:namespace/:type/versions
@@ -199,7 +191,7 @@ func providerVersions(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-func HandleLogin(w http.ResponseWriter, r *http.Request) {
+func (re *Registry) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -218,7 +210,7 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 }
 
-func HandleWellKnownTerraform(w http.ResponseWriter, r *http.Request) {
+func (re *Registry) HandleWellKnownTerraform(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
