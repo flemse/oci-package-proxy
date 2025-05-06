@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -17,6 +19,8 @@ const (
 	FileDigestAnnotation = "original-file-digest"
 	// FileNameAnnotation is the annotation key for the original file name.
 	FileNameAnnotation = "original-filename"
+	// ShasumSignatureAnnotation is the annotation key for the shasum signature.
+	ShasumSignatureAnnotation = "shasum-signature-encoded"
 )
 
 type Store struct {
@@ -118,4 +122,40 @@ func (s *Store) DownloadUrlForPlatform(ctx context.Context, tag, os, arch string
 		}
 	}
 	return DownloadInfo{}, fmt.Errorf("no blob URL found for OS %s and architecture %s", os, arch)
+}
+
+func (s *Store) GetFileContent(ctx context.Context, tag, os, arch string) (io.ReadCloser, error) {
+	idx, err := s.getIndex(ctx, tag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get index: %w", err)
+	}
+	for _, d := range idx.Manifests {
+		if d.ArtifactType == ArtifactType && d.Platform.OS == os && d.Platform.Architecture == arch {
+			reader, err := s.repo.Fetch(ctx, d)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch file content: %w", err)
+			}
+			var manifest ocispec.Manifest
+			if err := json.NewDecoder(reader).Decode(&manifest); err != nil {
+				return nil, fmt.Errorf("failed to decode manifest: %w", err)
+			}
+			lr, err := s.repo.Fetch(ctx, manifest.Layers[0])
+
+			return lr, nil
+		}
+	}
+	return nil, fmt.Errorf("no file content found for OS %s and architecture %s", os, arch)
+}
+
+func (s *Store) GetSignature(ctx context.Context, tag string) ([]byte, error) {
+	idx, err := s.getIndex(ctx, tag)
+	if err != nil {
+		return []byte{}, fmt.Errorf("failed to get index: %w", err)
+	}
+
+	if encodedSig, ok := idx.Annotations[ShasumSignatureAnnotation]; ok {
+		return base64.StdEncoding.DecodeString(encodedSig)
+	}
+
+	return []byte{}, fmt.Errorf("no signature found")
 }

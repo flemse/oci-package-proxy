@@ -8,6 +8,14 @@ brew install oras
 
 # Setup the registry
 docker run -it --rm -p 5001:5000 --name tf-oci ghcr.io/project-zot/zot:latest
+
+docker run -it --rm \
+  -p 5001:5000 \
+  --name tf-oci \
+  -v $(pwd)/tmp/cert.pem:/etc/ssl/certs/cert.pem:ro \
+  -v $(pwd)/tmp/key.pem:/etc/ssl/private/key.pem:ro \
+  -v $(pwd)/tmp/zot-config.json:/etc/zot/config.json:ro \
+  ghcr.io/project-zot/zot:latest 
 ```
 
 ## Build multi arch image

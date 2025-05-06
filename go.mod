@@ -1,4 +1,4 @@
-module fth-test-app
+module github.com/flemse/oci-package-proxy
 
 go 1.21.5
 

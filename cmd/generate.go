@@ -1,14 +1,19 @@
 package cmd
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"fth-test-app/pkg/store"
+	"github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/specs-go"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/spf13/cobra"
 )
@@ -20,47 +25,7 @@ var (
 	cleanOutPath bool
 )
 
-type IndexFile struct {
-	SchemaVersion int               `json:"schemaVersion"`
-	MediaType     string            `json:"mediaType"`
-	Manifests     []IndexEntry      `json:"manifests"`
-	Annotations   map[string]string `json:"annotations,omitempty"`
-}
-
-type IndexEntry struct {
-	MediaType    string            `json:"mediaType"`
-	Size         int64             `json:"size"`
-	Digest       string            `json:"digest"`
-	Platform     *Platform         `json:"platform,omitempty"`
-	ArtifactType string            `json:"artifactType,omitempty"`
-	Annotations  map[string]string `json:"annotations,omitempty"`
-}
-
-type LayerEntry struct {
-	MediaType string `json:"mediaType"`
-	Size      int64  `json:"size"`
-	Digest    string `json:"digest"`
-}
-
-type Descriptor struct {
-	MediaType string `json:"mediaType"`
-	Digest    string `json:"digest"`
-	Size      int64  `json:"size"`
-}
-
-type Manifest struct {
-	SchemaVersion int               `json:"schemaVersion"`
-	MediaType     string            `json:"mediaType"`
-	Config        Descriptor        `json:"config"`
-	Layers        []Descriptor      `json:"layers"`
-	Annotations   map[string]string `json:"annotations,omitempty"`
-}
 type ManifestConfig struct {
-	OS           string `json:"os"`
-	Architecture string `json:"architecture"`
-}
-
-type Platform struct {
 	OS           string `json:"os"`
 	Architecture string `json:"architecture"`
 }
@@ -91,17 +56,19 @@ var generateCmd = &cobra.Command{
 			log.Fatalf("Failed to create oci-layout file: %v", err)
 		}
 
-		var outerImageIndex IndexFile
-		outerImageIndex.SchemaVersion = 2
-		outerImageIndex.MediaType = "application/vnd.oci.image.index.v1+json"
-		outerImageIndex.Annotations = map[string]string{
-			"org.opencontainers.image.ref.name": refName,
+		outerImageIndex := ocispec.Index{
+			Versioned:   specs.Versioned{SchemaVersion: 2},
+			MediaType:   ocispec.MediaTypeImageIndex,
+			Annotations: map[string]string{},
 		}
 
-		var innerImageIndex IndexFile
-		innerImageIndex.SchemaVersion = 2
-		innerImageIndex.MediaType = "application/vnd.oci.image.index.v1+json"
+		innerImageIndex := ocispec.Index{
+			Versioned:   specs.Versioned{SchemaVersion: 2},
+			MediaType:   ocispec.MediaTypeImageIndex,
+			Annotations: map[string]string{},
+		}
 
+		foundSig := false
 		//createdAt := time.Now().Format(time.RFC3339)
 		err := filepath.WalkDir(inputPath, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
@@ -111,6 +78,24 @@ var generateCmd = &cobra.Command{
 			// Skip directories
 			if d.IsDir() {
 				return nil
+			}
+
+			if strings.HasSuffix(d.Name(), "SHA256SUMS.sig") {
+				foundSig = true
+				file, err := os.Open(path)
+				if err != nil {
+					log.Printf("Failed to open file %s: %v", path, err)
+					return nil
+				}
+				defer file.Close()
+
+				data, err := io.ReadAll(file)
+				if err != nil {
+					log.Printf("Failed to read file %s: %v", path, err)
+					return nil
+				}
+				encodedSig := base64.StdEncoding.EncodeToString(data)
+				innerImageIndex.Annotations[store.ShasumSignatureAnnotation] = encodedSig
 			}
 
 			// Process only .zip files
@@ -130,16 +115,14 @@ var generateCmd = &cobra.Command{
 					return nil
 				}
 
-				// Calculate SHA256 digest
-				hash := sha256.New()
-				if _, err := io.Copy(hash, file); err != nil {
-					log.Printf("Failed to calculate digest for %s: %v", path, err)
+				layerData, err := io.ReadAll(file)
+				if err != nil {
+					fmt.Printf("Error reading file: %v\n", err)
 					return nil
 				}
-				layerDigest := hex.EncodeToString(hash.Sum(nil))
-
+				layerDigest := digest.FromBytes(layerData)
 				// Copy the file to blobs/sha256 with the digest as the filename
-				blobPath := filepath.Join(blobsDir, layerDigest)
+				blobPath := filepath.Join(blobsDir, layerDigest.Encoded())
 				if _, err := file.Seek(0, io.SeekStart); err != nil {
 					log.Printf("Failed to reset file pointer for %s: %v", path, err)
 					return nil
@@ -174,30 +157,29 @@ var generateCmd = &cobra.Command{
 					log.Printf("Failed to marshal config for %s: %v", d.Name(), err)
 					return nil
 				}
-				configDigest := sha256.Sum256(configData)
-				configDigestHex := hex.EncodeToString(configDigest[:])
-				configPath := filepath.Join(blobsDir, configDigestHex)
+				configDigest := digest.FromString(string(configData))
+				configPath := filepath.Join(blobsDir, configDigest.Encoded())
 				if err := os.WriteFile(configPath, configData, os.ModePerm); err != nil {
 					log.Printf("Failed to write manifest file %s: %v", configPath, err)
 					return nil
 				}
 				annotations := map[string]string{
-					"original-filename":    d.Name(),
-					"original-file-digest": layerDigest,
+					store.FileNameAnnotation:   d.Name(),
+					store.FileDigestAnnotation: layerDigest.String(),
 				}
-				manifest := Manifest{
-					SchemaVersion: 2,
-					MediaType:     "application/vnd.oci.image.manifest.v1+json",
-					Config: Descriptor{
-						MediaType: "application/vnd.oci.image.config.v1+json",
-						Digest:    "sha256:" + configDigestHex,
+				manifest := ocispec.Manifest{
+					Versioned: specs.Versioned{SchemaVersion: 2},
+					MediaType: ocispec.MediaTypeImageManifest,
+					Config: ocispec.Descriptor{
+						MediaType: ocispec.MediaTypeImageConfig,
+						Digest:    configDigest,
 						Size:      int64(len(configData)),
 					},
-					Layers: []Descriptor{
+					Layers: []ocispec.Descriptor{
 						{
-							MediaType: "application/vnd.oci.image.layer.v1.tar+gzip",
+							MediaType: ocispec.MediaTypeImageLayerGzip,
 							Size:      info.Size(),
-							Digest:    "sha256:" + layerDigest,
+							Digest:    layerDigest,
 						},
 					},
 					Annotations: annotations,
@@ -209,23 +191,23 @@ var generateCmd = &cobra.Command{
 					return nil
 				}
 
-				manifestDigest := sha256.Sum256(manifestData)
-				manifestDigestHex := hex.EncodeToString(manifestDigest[:])
-				manifestPath := filepath.Join(blobsDir, manifestDigestHex)
+				manifestDigest := digest.FromBytes(manifestData)
+				manifestPath := filepath.Join(blobsDir, manifestDigest.Encoded())
 				if err := os.WriteFile(manifestPath, manifestData, os.ModePerm); err != nil {
 					log.Printf("Failed to write manifest file %s: %v", manifestPath, err)
 					return nil
 				}
 
-				entry := IndexEntry{
-					MediaType: "application/vnd.oci.image.manifest.v1+json",
-					Size:      int64(len(manifestData)),
-					Digest:    "sha256:" + manifestDigestHex,
-					Platform: &Platform{
+				entry := ocispec.Descriptor{
+					MediaType:   ocispec.MediaTypeImageManifest,
+					Size:        int64(len(manifestData)),
+					Digest:      manifestDigest,
+					Annotations: annotations,
+
+					Platform: &ocispec.Platform{
 						OS:           osName,
 						Architecture: arch,
 					},
-					Annotations:  annotations,
 					ArtifactType: "application/vnd.tf.provider.v1+json",
 				}
 				// Add entry to the manifest list
@@ -245,19 +227,18 @@ var generateCmd = &cobra.Command{
 			log.Fatalf("Failed to marshal inner image index: %v", err)
 		}
 
-		innerIndexDigest := sha256.Sum256(innerIndexData)
-		innerIndexDigestHex := hex.EncodeToString(innerIndexDigest[:])
-		innerIndexPath := filepath.Join(blobsDir, innerIndexDigestHex)
+		innerIndexDigest := digest.FromBytes(innerIndexData)
+		innerIndexPath := filepath.Join(blobsDir, innerIndexDigest.Encoded())
 		if err := os.WriteFile(innerIndexPath, innerIndexData, os.ModePerm); err != nil {
 			log.Fatalf("Failed to write manifest file %s: %v", innerIndexPath, err)
 		}
 
-		outerImageIndex.Manifests = append(outerImageIndex.Manifests, IndexEntry{
-			MediaType: "application/vnd.oci.image.index.v1+json",
+		outerImageIndex.Manifests = append(outerImageIndex.Manifests, ocispec.Descriptor{
+			MediaType: ocispec.MediaTypeImageIndex,
 			Size:      int64(len(innerIndexData)),
-			Digest:    "sha256:" + innerIndexDigestHex,
+			Digest:    innerIndexDigest,
 			Annotations: map[string]string{
-				"org.opencontainers.image.ref.name": refName,
+				ocispec.AnnotationRefName: refName,
 			},
 		})
 
@@ -273,6 +254,10 @@ var generateCmd = &cobra.Command{
 		encoder.SetIndent("", "  ")
 		if err := encoder.Encode(outerImageIndex); err != nil {
 			log.Fatalf("Failed to write index.json: %v", err)
+		}
+
+		if !foundSig {
+			log.Printf("No signature found")
 		}
 
 		log.Printf("OCI layout created at %s", outPath)
