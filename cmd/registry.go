@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 
 	"github.com/flemse/oci-package-proxy/internal/devcert"
 	"github.com/flemse/oci-package-proxy/pkg/registries/terraform"
@@ -84,4 +85,9 @@ func setupRepoClientWithAuth(repoURL string) (*remote.Repository, error) {
 	repo.Client = c
 
 	return repo, nil
+}
+
+func getGitHubToken() string {
+	token := os.Getenv("GITHUB_TOKEN")
+	return token
 }

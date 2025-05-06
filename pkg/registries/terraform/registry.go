@@ -6,7 +6,7 @@ import (
 	"log"
 	"net/http"
 
-	"fth-test-app/pkg/store"
+	"github.com/flemse/oci-package-proxy/pkg/store"
 	"github.com/go-chi/chi/v5"
 )
 

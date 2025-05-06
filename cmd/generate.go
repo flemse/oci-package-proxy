@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"fth-test-app/pkg/store"
+	"github.com/flemse/oci-package-proxy/pkg/store"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
