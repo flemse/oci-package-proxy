@@ -68,6 +68,7 @@ var generateCmd = &cobra.Command{
 			Annotations: map[string]string{},
 		}
 
+		foundShasum := false
 		foundSig := false
 		//createdAt := time.Now().Format(time.RFC3339)
 		err := filepath.WalkDir(inputPath, func(path string, d os.DirEntry, err error) error {
@@ -80,6 +81,23 @@ var generateCmd = &cobra.Command{
 				return nil
 			}
 
+			if strings.HasSuffix(d.Name(), "SHA256SUMS") {
+				foundShasum = true
+				file, err := os.Open(path)
+				if err != nil {
+					log.Printf("Failed to open file %s: %v", path, err)
+					return nil
+				}
+				defer file.Close()
+
+				data, err := io.ReadAll(file)
+				if err != nil {
+					log.Printf("Failed to read file %s: %v", path, err)
+					return nil
+				}
+				encodedShasum := base64.StdEncoding.EncodeToString(data)
+				innerImageIndex.Annotations[store.ShasumAnnotation] = encodedShasum
+			}
 			if strings.HasSuffix(d.Name(), "SHA256SUMS.sig") {
 				foundSig = true
 				file, err := os.Open(path)
@@ -165,7 +183,7 @@ var generateCmd = &cobra.Command{
 				}
 				annotations := map[string]string{
 					store.FileNameAnnotation:   d.Name(),
-					store.FileDigestAnnotation: layerDigest.String(),
+					store.FileDigestAnnotation: layerDigest.Encoded(),
 				}
 				manifest := ocispec.Manifest{
 					Versioned: specs.Versioned{SchemaVersion: 2},
@@ -258,6 +276,9 @@ var generateCmd = &cobra.Command{
 
 		if !foundSig {
 			log.Printf("No signature found")
+		}
+		if !foundShasum {
+			log.Printf("No shasums found")
 		}
 
 		log.Printf("OCI layout created at %s", outPath)

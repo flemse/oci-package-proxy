@@ -70,32 +70,29 @@ type Provider struct {
     ]
 */
 type DownloadResponse struct {
-	Arch                string    `json:"arch"`
-	DownloadURL         string    `json:"download_url"`
-	Filename            string    `json:"filename"`
-	OS                  string    `json:"os"`
-	Protocols           []string  `json:"protocols"`
-	Shasum              string    `json:"shasum"`
-	ShasumsURL          string    `json:"shasums_url"`
-	ShasumsSignatureURL string    `json:"shasums_signature_url,omitempty"`
-	GPGPublicKeys       []*GPGKey `json:"gpg_public_keys,omitempty"`
+	Arch                string         `json:"arch"`
+	DownloadURL         string         `json:"download_url"`
+	Filename            string         `json:"filename"`
+	OS                  string         `json:"os"`
+	Protocols           []string       `json:"protocols"`
+	Shasum              string         `json:"shasum,omitempty"`
+	ShasumsURL          string         `json:"shasums_url,omitempty"`
+	ShasumsSignatureURL string         `json:"shasums_signature_url,omitempty"`
+	SigningKeys         SigningKeyList `json:"signing_keys"`
+}
+type SigningKeyList struct {
+	GPGPublicKeys []*SigningKey `json:"gpg_public_keys,omitempty"`
 }
 
-type GPGKey struct {
-	KeyID          string `json:"key_id"`
-	AsciiArmor     string `json:"ascii_armor"`
-	TrustSignature string `json:"trust_signature"`
-	Source         string `json:"source"`
-	SourceURL      string `json:"source_url"`
+type SigningKey struct {
+	KeyID      string `json:"key_id"`
+	AsciiArmor string `json:"ascii_armor"`
 }
 
 var (
-	Modules = []Module{
-		{Name: "example/aws", Version: []string{"1.0.0", "1.1.0"}},
-	}
+	Modules   []Module
 	Providers = []Provider{
-		{Name: "example/aws", Version: []string{"2.1.0", "2.1.1"}},
-		{Name: "novus/applicationmanagement", Version: []string{"0.0.10", "0.3.0"}},
+		{Name: "novus/applicationmanagement", Version: []string{"0.3.0"}},
 	}
 )
 
@@ -216,19 +213,17 @@ func (re *Registry) providerDownload(w http.ResponseWriter, r *http.Request) {
 		Shasum:              info.Digest,
 		ShasumsURL:          "/_providers/" + ns + "/" + t + "/" + version + "/" + osName + "/" + arch + "/shasum",
 		ShasumsSignatureURL: "/_providers/" + ns + "/" + t + "/" + version + "/" + osName + "/" + arch + "/shasum.sig",
-		GPGPublicKeys: []*GPGKey{
-			{
-				KeyID:          "BF7300E6824F3973",
-				AsciiArmor:     "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\n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\nKQTMMZKMY+4Tuhc=\n=tgWU\n-----END PGP PUBLIC KEY BLOCK-----",
-				TrustSignature: "",
-				Source:         "LEGO",
-				SourceURL:      "https://lego.com",
+		SigningKeys: SigningKeyList{
+			GPGPublicKeys: []*SigningKey{
+				{
+					KeyID:      "BF7300E6824F3973",
+					AsciiArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\n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\nKQTMMZKMY+4Tuhc=\n=tgWU\n-----END PGP PUBLIC KEY BLOCK-----",
+				},
 			},
 		},
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
-	return
 }
 
 func (re *Registry) providerVersions(w http.ResponseWriter, r *http.Request) {

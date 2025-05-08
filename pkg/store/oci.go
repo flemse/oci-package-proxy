@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/registry/remote"
@@ -21,6 +20,8 @@ const (
 	FileNameAnnotation = "original-filename"
 	// ShasumSignatureAnnotation is the annotation key for the shasum signature.
 	ShasumSignatureAnnotation = "shasum-signature-encoded"
+	// ShasumAnnotation is the annotation key for the shasum.
+	ShasumAnnotation = "shasum"
 )
 
 type Store struct {
@@ -63,30 +64,17 @@ func (s *Store) getIndex(ctx context.Context, ref string) (*ocispec.Index, error
 	return &index, nil
 }
 
-func (s *Store) Shasums(ctx context.Context, tag string) (string, error) {
+func (s *Store) Shasums(ctx context.Context, tag string) ([]byte, error) {
 	idx, err := s.getIndex(ctx, tag)
 	if err != nil {
-		return "", fmt.Errorf("failed to get index: %w", err)
-	}
-	var descriptors []ocispec.Descriptor
-	for _, d := range idx.Manifests {
-		if d.ArtifactType == ArtifactType {
-			descriptors = append(descriptors, d)
-		}
-	}
-	if len(descriptors) == 0 {
-		return "", fmt.Errorf("no descriptors found")
+		return []byte{}, fmt.Errorf("failed to get index: %w", err)
 	}
 
-	buf := strings.Builder{}
-	for _, d := range descriptors {
-		buf.WriteString(d.Annotations[FileDigestAnnotation])
-		buf.WriteString(" ")
-		buf.WriteString(d.Annotations[FileNameAnnotation])
-		buf.WriteString("\n")
+	if encodedSig, ok := idx.Annotations[ShasumAnnotation]; ok {
+		return base64.StdEncoding.DecodeString(encodedSig)
 	}
 
-	return buf.String(), nil
+	return []byte{}, fmt.Errorf("shasums found")
 }
 
 func (s *Store) DownloadUrls(ctx context.Context, tag string) (map[string]string, error) {
