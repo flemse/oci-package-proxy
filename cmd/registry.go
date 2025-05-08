@@ -18,28 +18,31 @@ import (
 	"oras.land/oras-go/v2/registry/remote/auth"
 )
 
+var (
+	port             string
+	hostOCI          string
+	allowInsecureOCI bool
+	repoName         string
+)
+
 // registryCmd represents the registry command
 var registryCmd = &cobra.Command{
 	Use:   "registry",
 	Short: "terraform registry",
 	Long:  `terraform registry host`,
 	Run: func(cmd *cobra.Command, args []string) {
-		port, err := cmd.Flags().GetString("port")
-		if err != nil {
-			log.Fatal("failed to get port flag", err)
-		}
-
 		devcert.GenerateCert()
 
 		r := chi.NewRouter()
 		r.Use(middleware.RequestID)
 		r.Use(middleware.Logger)
 
-		host := "ghcr.io"
-		repoName := "lego/novus/applicationmanagement"
-		repo, err := setupRepoClientWithAuth(fmt.Sprintf("%s/%s", host, repoName))
-		//repo.PlainHTTP = true
+		repo, err := NewRepository(fmt.Sprintf("%s/%s", hostOCI, repoName))
+		if err != nil {
+			log.Fatalf("failed to create repository: %v", err)
+		}
 
+		repo.PlainHTTP = allowInsecureOCI
 		reg := terraform.Registry{
 			OCI: store.NewStore(repo),
 		}
@@ -58,21 +61,23 @@ func init() {
 
 	// Cobra supports Persistent Flags which will work for this command
 	// and all subcommands, e.g.:
-	registryCmd.PersistentFlags().StringP("port", "p", "8080", "port to run the server")
-
+	registryCmd.PersistentFlags().StringVarP(&port, "port", "p", "8080", "port to run the server")
+	registryCmd.PersistentFlags().StringVar(&hostOCI, "oci-host", "ghcr.io", "host for the OCI registry eq. ghcr.io or localhost:5001")
+	registryCmd.PersistentFlags().BoolVar(&allowInsecureOCI, "oci-insecure", false, "allow insecure connections to the OCI registry")
+	registryCmd.PersistentFlags().StringVar(&repoName, "repo-name", "novus/applicationmanagement", "repository name for the OCI registry")
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
 	// registryCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
 
-func setupRepoClientWithAuth(repoURL string) (*remote.Repository, error) {
-	// Get the GitHub token from the environment
-	token := getGitHubToken()
-
-	// Create the repository client
-	repo, err := remote.NewRepository(repoURL)
+func NewRepository(reference string) (*remote.Repository, error) {
+	token := os.Getenv("GITHUB_TOKEN")
+	repo, err := remote.NewRepository(reference)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create repository: %w", err)
+	}
+	if token == "" {
+		return repo, nil
 	}
 
 	c := auth.DefaultClient
@@ -82,12 +87,7 @@ func setupRepoClientWithAuth(repoURL string) (*remote.Repository, error) {
 			Password: token,
 		}, nil
 	}
+
 	repo.Client = c
-
 	return repo, nil
-}
-
-func getGitHubToken() string {
-	token := os.Getenv("GITHUB_TOKEN")
-	return token
 }

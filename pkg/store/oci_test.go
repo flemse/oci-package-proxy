@@ -85,3 +85,18 @@ func TestGetOciStore(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, manifestDescriptor)
 }
+
+func TestGetVersions(t *testing.T) {
+	ctx := context.Background()
+	host := "localhost:5001"
+	repoName := "novus/applicationmanagement"
+	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", host, repoName))
+	repo.PlainHTTP = true
+	assert.NoError(t, err)
+	oci := NewStore(repo)
+
+	versions, err := oci.Versions(ctx)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, versions)
+
+}

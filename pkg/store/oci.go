@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/registry/remote"
@@ -43,6 +44,23 @@ func (s *Store) getProtocol() string {
 		return "http"
 	}
 	return "https"
+}
+
+func (s *Store) Versions(ctx context.Context) ([]string, error) {
+	var tags []string
+	err := s.repo.Tags(ctx, "", func(tagList []string) error {
+		tags = append(tags, tagList...)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch tags: %w", err)
+	}
+	for i, tag := range tags {
+		if strings.HasPrefix(tag, "v") {
+			tags[i] = strings.TrimPrefix(tag, "v")
+		}
+	}
+	return tags, nil
 }
 
 func (s *Store) getIndex(ctx context.Context, ref string) (*ocispec.Index, error) {
@@ -123,6 +141,7 @@ func (s *Store) GetFileContent(ctx context.Context, tag, os, arch string) (io.Re
 			if err != nil {
 				return nil, fmt.Errorf("failed to fetch file content: %w", err)
 			}
+			defer reader.Close()
 			var manifest ocispec.Manifest
 			if err := json.NewDecoder(reader).Decode(&manifest); err != nil {
 				return nil, fmt.Errorf("failed to decode manifest: %w", err)

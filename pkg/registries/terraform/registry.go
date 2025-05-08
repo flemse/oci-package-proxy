@@ -2,6 +2,7 @@ package terraform
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -167,6 +168,7 @@ func (re *Registry) providerShasumSig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error getting signature", http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(sig)
 }
 
@@ -181,11 +183,20 @@ func (re *Registry) providerStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error getting file content", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/zip")
+	defer content.Close()
 
-	if _, err := io.Copy(w, content); err != nil {
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=terraform-provider_%s_%s.zip", osName, arch))
+
+	buf := make([]byte, 32*1024) // 32KB buffer
+	written, err := io.CopyBuffer(w, content, buf)
+	if err != nil {
 		log.Printf("Error writing file content: %v", err)
-		http.Error(w, "Error writing file content", http.StatusInternalServerError)
+		// We can't send an HTTP error here as headers have already been sent
+		if written > 0 {
+			log.Printf("Partial write: %d bytes written before error", written)
+		}
+		// Don't exit the handler until copy is complete or fails
 		return
 	}
 }
@@ -227,27 +238,25 @@ func (re *Registry) providerDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (re *Registry) providerVersions(w http.ResponseWriter, r *http.Request) {
-	ns := r.PathValue("namespace")
-	t := r.PathValue("type")
-	// Handle versions: /v1/providers/:namespace/:type/versions
-	for _, provider := range Providers {
-		if provider.Name == ns+"/"+t {
-			// Construct the VersionsResponse
-			var response VersionsResponse
-			for _, version := range provider.Version {
-				response.Versions = append(response.Versions, VersionDetail{
-					Version:   version,
-					Protocols: []string{"5.0"}, // Example protocol version
-				})
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(response)
-			return
-		}
+	//ns := r.PathValue("namespace")
+	//t := r.PathValue("type")
+	versions, err := re.OCI.Versions(r.Context())
+	if err != nil {
+		log.Printf("Error getting versions: %v", err)
+		http.Error(w, "Error getting versions", http.StatusInternalServerError)
+		return
 	}
-	http.Error(w, "Provider not found", http.StatusNotFound)
-	return
+	// Handle versions: /v1/providers/:namespace/:type/versions
+	var response VersionsResponse
+	for _, v := range versions {
+		response.Versions = append(response.Versions, VersionDetail{
+			Version:   v,
+			Protocols: []string{"5.0"}, // Example protocol version
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }
 
 func (re *Registry) HandleLogin(w http.ResponseWriter, r *http.Request) {
