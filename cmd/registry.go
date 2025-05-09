@@ -19,10 +19,11 @@ import (
 )
 
 var (
-	port             string
-	hostOCI          string
-	allowInsecureOCI bool
-	repoName         string
+	port              string
+	hostOCI           string
+	allowInsecureOCI  bool
+	repoName          string
+	packageConfigFile string
 )
 
 // registryCmd represents the registry command
@@ -42,9 +43,15 @@ var registryCmd = &cobra.Command{
 			log.Fatalf("failed to create repository: %v", err)
 		}
 
+		packageList, err := terraform.LoadPackageConfig(packageConfigFile)
+		if err != nil {
+			log.Fatalf("failed to load package config: %v", err)
+		}
+
 		repo.PlainHTTP = allowInsecureOCI
 		reg := terraform.Registry{
-			OCI: store.NewStore(repo),
+			OCI:         store.NewStore(repo),
+			PackageList: packageList,
 		}
 		reg.SetupRoutes(r)
 
@@ -65,6 +72,8 @@ func init() {
 	registryCmd.PersistentFlags().StringVar(&hostOCI, "oci-host", "ghcr.io", "host for the OCI registry eq. ghcr.io or localhost:5001")
 	registryCmd.PersistentFlags().BoolVar(&allowInsecureOCI, "oci-insecure", false, "allow insecure connections to the OCI registry")
 	registryCmd.PersistentFlags().StringVar(&repoName, "repo-name", "novus/applicationmanagement", "repository name for the OCI registry")
+	registryCmd.PersistentFlags().StringVar(&packageConfigFile, "package-config", "tmp/packages.yaml", "path to the package config file")
+
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
 	// registryCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")

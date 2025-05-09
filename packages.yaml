@@ -1,0 +1,8 @@
+packages:
+- name: "packagename"
+  signingKeys:
+  - keyID: "kid"
+    asciiArmor: |
+      -----BEGIN PGP PUBLIC KEY BLOCK-----
+      ...
+      -----END PGP PUBLIC KEY BLOCK-----
