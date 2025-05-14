@@ -1,14 +1,22 @@
 package terraform
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"path"
+	"strings"
 
+	"github.com/flemse/oci-package-proxy/pkg/registries/auth"
 	"github.com/flemse/oci-package-proxy/pkg/store"
 	"github.com/go-chi/chi/v5"
+	orasauth "oras.land/oras-go/v2/registry/remote/auth"
 )
 
 type DiscoveryResponse struct {
@@ -55,13 +63,30 @@ var (
 )
 
 type Registry struct {
-	OCI         *store.Store
-	PackageList *PackageList
+	OCIHost       string
+	OrgKey        string
+	allowInsecure bool
+	PackageList   *PackageList
+	key           []byte
+}
+
+func NewRegistry(ociHost, orgKey string, allowInsecure bool, packageList *PackageList) *Registry {
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	if err != nil {
+		log.Fatalf("failed to generate random key: %v", err)
+	}
+
+	return &Registry{
+		OCIHost:       ociHost,
+		OrgKey:        orgKey,
+		allowInsecure: allowInsecure,
+		PackageList:   packageList,
+		key:           key,
+	}
 }
 
 func (re *Registry) SetupRoutes(mux chi.Router) {
-	mux.HandleFunc("/v1/modules/", re.HandleModules)
-	mux.HandleFunc("/v1/providers/{namespace}/{type}", re.providerBase)
 	mux.HandleFunc("/v1/providers/{namespace}/{type}/versions", re.providerVersions)
 	mux.HandleFunc("/v1/providers/{namespace}/{type}/{version}/download/{os}/{arch}", re.providerDownload)
 	mux.HandleFunc("/_providers/{namespace}/{type}/{version}/{os}/{arch}/shasum", re.providerShasum)
@@ -71,43 +96,18 @@ func (re *Registry) SetupRoutes(mux chi.Router) {
 	mux.HandleFunc("/.well-known/terraform.json", re.HandleWellKnownTerraform)
 }
 
-func (re *Registry) HandleModules(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+func (re *Registry) providerShasum(w http.ResponseWriter, r *http.Request) {
+	version := r.PathValue("version")
+	creds := credsFromRequest(r)
+
+	ociStore, err := store.NewStore(re.OCIHost, re.packageName(r), creds, re.allowInsecure)
+	if err != nil {
+		log.Printf("Error creating OCI store: %v", err)
+		http.Error(w, "Error creating OCI store", http.StatusInternalServerError)
 		return
 	}
 
-	moduleName := r.URL.Path[len("/v1/modules/"):]
-	for _, module := range Modules {
-		if module.Name == moduleName {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(module)
-			return
-		}
-	}
-
-	http.Error(w, "Module not found", http.StatusNotFound)
-}
-
-func (re *Registry) providerBase(w http.ResponseWriter, r *http.Request) {
-	// Handle metadata: /v1/providers/:namespace/:type
-	ns := r.PathValue("namespace")
-	t := r.PathValue("type")
-	for _, provider := range Providers {
-		if provider.Name == ns+"/"+t {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(provider)
-			return
-		}
-	}
-	http.Error(w, "Provider not found", http.StatusNotFound)
-	return
-}
-
-func (re *Registry) providerShasum(w http.ResponseWriter, r *http.Request) {
-	version := r.PathValue("version")
-
-	shasums, err := re.OCI.Shasums(r.Context(), "v"+version)
+	shasums, err := ociStore.Shasums(r.Context(), "v"+version)
 	if err != nil {
 		return
 	}
@@ -118,8 +118,16 @@ func (re *Registry) providerShasum(w http.ResponseWriter, r *http.Request) {
 
 func (re *Registry) providerShasumSig(w http.ResponseWriter, r *http.Request) {
 	version := r.PathValue("version")
+	creds := credsFromRequest(r)
 
-	sig, err := re.OCI.GetSignature(r.Context(), "v"+version)
+	ociStore, err := store.NewStore(re.OCIHost, re.packageName(r), creds, re.allowInsecure)
+	if err != nil {
+		log.Printf("Error creating OCI store: %v", err)
+		http.Error(w, "Error creating OCI store", http.StatusInternalServerError)
+		return
+	}
+
+	sig, err := ociStore.GetSignature(r.Context(), "v"+version)
 	if err != nil {
 		log.Printf("Error getting signature: %v", err)
 		http.Error(w, "Error getting signature", http.StatusInternalServerError)
@@ -133,8 +141,30 @@ func (re *Registry) providerStream(w http.ResponseWriter, r *http.Request) {
 	version := r.PathValue("version")
 	osName := r.PathValue("os")
 	arch := r.PathValue("arch")
+	encryptedToken := r.URL.Query().Get("token")
 
-	content, err := re.OCI.GetFileContent(r.Context(), "v"+version, osName, arch)
+	var creds *orasauth.Credential
+	if encryptedToken != "" {
+		token, err := auth.Decrypt(re.key, encryptedToken, generateFingerprint(r))
+		if err != nil {
+			log.Printf("Error decrypting token: %v", err)
+			http.Error(w, "Error decrypting token", http.StatusInternalServerError)
+			return
+		}
+		creds = &orasauth.Credential{
+			Username: "oauth2",
+			Password: token,
+		}
+	}
+
+	ociStore, err := store.NewStore(re.OCIHost, re.packageName(r), creds, re.allowInsecure)
+	if err != nil {
+		log.Printf("Error creating OCI store: %v", err)
+		http.Error(w, "Error creating OCI store", http.StatusInternalServerError)
+		return
+	}
+
+	content, err := ociStore.GetFileContent(r.Context(), "v"+version, osName, arch)
 	if err != nil {
 		log.Printf("Error getting file content: %v", err)
 		http.Error(w, "Error getting file content", http.StatusInternalServerError)
@@ -164,8 +194,27 @@ func (re *Registry) providerDownload(w http.ResponseWriter, r *http.Request) {
 	version := r.PathValue("version")
 	osName := r.PathValue("os")
 	arch := r.PathValue("arch")
+	creds := credsFromRequest(r)
 
-	info, err := re.OCI.DownloadUrlForPlatform(r.Context(), "v"+version, osName, arch)
+	ociStore, err := store.NewStore(re.OCIHost, re.packageName(r), creds, re.allowInsecure)
+	if err != nil {
+		log.Printf("Error creating OCI store: %v", err)
+		http.Error(w, "Error creating OCI store", http.StatusInternalServerError)
+		return
+	}
+
+	token := ""
+	if creds != nil {
+		t, err := auth.Encrypt(re.key, creds.Password, generateFingerprint(r))
+		if err != nil {
+			log.Printf("Error encrypting token: %v", err)
+			http.Error(w, "Error encrypting token", http.StatusInternalServerError)
+			return
+		}
+		token = t
+	}
+
+	info, err := ociStore.DownloadUrlForPlatform(r.Context(), "v"+version, osName, arch)
 	if err != nil {
 		log.Printf("Error getting download URL: %v", err)
 		http.Error(w, "Error getting download URL", http.StatusInternalServerError)
@@ -180,9 +229,14 @@ func (re *Registry) providerDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	downloadURL := "/_providers/" + ns + "/" + t + "/" + version + "/" + osName + "/" + arch + "/stream"
+	if token != "" {
+		downloadURL += "?token=" + token
+	}
+
 	resp := DownloadResponse{
 		Arch:                arch,
-		DownloadURL:         "/_providers/" + ns + "/" + t + "/" + version + "/" + osName + "/" + arch + "/stream",
+		DownloadURL:         downloadURL,
 		Filename:            info.Filename,
 		OS:                  osName,
 		Protocols:           []string{"5.0"},
@@ -196,15 +250,21 @@ func (re *Registry) providerDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (re *Registry) providerVersions(w http.ResponseWriter, r *http.Request) {
-	//ns := r.PathValue("namespace")
-	//t := r.PathValue("type")
-	versions, err := re.OCI.Versions(r.Context())
+	creds := credsFromRequest(r)
+	ociStore, err := store.NewStore(re.OCIHost, re.packageName(r), creds, re.allowInsecure)
+	if err != nil {
+		log.Printf("Error creating OCI store: %v", err)
+		http.Error(w, "Error creating OCI store", http.StatusInternalServerError)
+		return
+	}
+
+	versions, err := ociStore.Versions(r.Context())
 	if err != nil {
 		log.Printf("Error getting versions: %v", err)
 		http.Error(w, "Error getting versions", http.StatusInternalServerError)
 		return
 	}
-	// Handle versions: /v1/providers/:namespace/:type/versions
+
 	var response VersionsResponse
 	for _, v := range versions {
 		response.Versions = append(response.Versions, VersionDetail{
@@ -249,4 +309,53 @@ func (re *Registry) HandleWellKnownTerraform(w http.ResponseWriter, r *http.Requ
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(discovery)
+}
+
+func generateFingerprint(r *http.Request) string {
+	h := sha256.New()
+
+	//remove port
+	ipAddress := r.RemoteAddr
+	if ip, _, err := net.SplitHostPort(ipAddress); err == nil {
+		ipAddress = ip
+	}
+	if forwardedFor := r.Header.Get("X-Forwarded-For"); forwardedFor != "" {
+		ipParts := strings.Split(forwardedFor, ",")
+		ipAddress = strings.TrimSpace(ipParts[0])
+	}
+	h.Write([]byte(ipAddress))
+
+	h.Write([]byte(r.UserAgent()))
+
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		h.Write(r.TLS.PeerCertificates[0].Raw)
+	}
+
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (re *Registry) packageName(r *http.Request) string {
+	var segments []string
+	if re.OrgKey != "" {
+		segments = append(segments, re.OrgKey)
+	}
+	segments = append(segments,
+		r.PathValue("namespace"),
+		r.PathValue("type"))
+
+	return path.Join(segments...)
+}
+
+func credsFromRequest(r *http.Request) *orasauth.Credential {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return nil
+	}
+
+	authHeader, _ = strings.CutPrefix(authHeader, "Bearer ")
+
+	return &orasauth.Credential{
+		Username: "oauth2",
+		Password: authHeader,
+	}
 }

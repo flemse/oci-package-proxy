@@ -10,6 +10,7 @@ import (
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/registry/remote"
+	"oras.land/oras-go/v2/registry/remote/auth"
 )
 
 const (
@@ -35,15 +36,24 @@ type DownloadInfo struct {
 	Digest   string
 }
 
-func NewStore(repo *remote.Repository) *Store {
-	return &Store{repo: repo}
-}
-
-func (s *Store) getProtocol() string {
-	if s.repo.PlainHTTP {
-		return "http"
+func NewStore(ociHost, packageName string, creds *auth.Credential, allowInsecure bool) (*Store, error) {
+	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", ociHost, packageName))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create repository: %w", err)
 	}
-	return "https"
+
+	repo.PlainHTTP = allowInsecure
+	c := auth.DefaultClient
+	if creds != nil {
+		c.Credential = func(ctx context.Context, hostport string) (auth.Credential, error) {
+			return *creds, nil
+		}
+	}
+
+	repo.Client = c
+	return &Store{
+		repo: repo,
+	}, nil
 }
 
 func (s *Store) Versions(ctx context.Context) ([]string, error) {
@@ -61,25 +71,6 @@ func (s *Store) Versions(ctx context.Context) ([]string, error) {
 		}
 	}
 	return tags, nil
-}
-
-func (s *Store) getIndex(ctx context.Context, ref string) (*ocispec.Index, error) {
-	indexDesc, err := s.repo.Resolve(ctx, ref)
-	if err != nil {
-		return nil, err
-	}
-
-	indexReader, err := s.repo.Fetch(ctx, indexDesc)
-	if err != nil {
-		return nil, err
-	}
-	defer indexReader.Close()
-
-	var index ocispec.Index
-	if err := json.NewDecoder(indexReader).Decode(&index); err != nil {
-		return nil, fmt.Errorf("failed to decode index: %w", err)
-	}
-	return &index, nil
 }
 
 func (s *Store) Shasums(ctx context.Context, tag string) ([]byte, error) {
@@ -165,4 +156,30 @@ func (s *Store) GetSignature(ctx context.Context, tag string) ([]byte, error) {
 	}
 
 	return []byte{}, fmt.Errorf("no signature found")
+}
+
+func (s *Store) getIndex(ctx context.Context, ref string) (*ocispec.Index, error) {
+	indexDesc, err := s.repo.Resolve(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+
+	indexReader, err := s.repo.Fetch(ctx, indexDesc)
+	if err != nil {
+		return nil, err
+	}
+	defer indexReader.Close()
+
+	var index ocispec.Index
+	if err := json.NewDecoder(indexReader).Decode(&index); err != nil {
+		return nil, fmt.Errorf("failed to decode index: %w", err)
+	}
+	return &index, nil
+}
+
+func (s *Store) getProtocol() string {
+	if s.repo.PlainHTTP {
+		return "http"
+	}
+	return "https"
 }

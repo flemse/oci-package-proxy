@@ -48,10 +48,8 @@ func TestShasumsFromIndex(t *testing.T) {
 	ctx := context.Background()
 	host := "localhost:5001"
 	repoName := "appmgmt"
-	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", host, repoName))
-	repo.PlainHTTP = true
+	oci, err := NewStore(host, repoName, nil, true)
 	assert.NoError(t, err)
-	oci := NewStore(repo)
 
 	shasums, err := oci.Shasums(ctx, "v1")
 	assert.NoError(t, err)
@@ -62,10 +60,8 @@ func TestDownloadUrlsFromIndex(t *testing.T) {
 	ctx := context.Background()
 	host := "localhost:5001"
 	repoName := "appmgmt"
-	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", host, repoName))
-	repo.PlainHTTP = true
+	oci, err := NewStore(host, repoName, nil, true)
 	assert.NoError(t, err)
-	oci := NewStore(repo)
 
 	urls, err := oci.DownloadUrls(ctx, "v1")
 	assert.NoError(t, err)
@@ -95,7 +91,8 @@ func TestGetVersions(t *testing.T) {
 	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", host, repoName))
 	repo.PlainHTTP = true
 	assert.NoError(t, err)
-	oci := NewStore(repo)
+	oci, err := NewStore(host, repoName, nil, true)
+	assert.NoError(t, err)
 
 	versions, err := oci.Versions(ctx)
 	assert.NoError(t, err)
@@ -127,26 +124,4 @@ func TestGetPackages_GHCR_Success(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.NotEmpty(t, repos)
-}
-
-func NewRepository(reference string) (*remote.Repository, error) {
-	token := os.Getenv("GITHUB_TOKEN")
-	repo, err := remote.NewRepository(reference)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create repository: %w", err)
-	}
-	if token == "" {
-		return repo, nil
-	}
-
-	c := auth.DefaultClient
-	c.Credential = func(ctx context.Context, registry string) (auth.Credential, error) {
-		return auth.Credential{
-			Username: "oauth2", // GitHub requires "oauth2" as the username for PATs
-			Password: token,
-		}, nil
-	}
-
-	repo.Client = c
-	return repo, nil
 }
