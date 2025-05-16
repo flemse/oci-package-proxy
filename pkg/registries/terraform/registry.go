@@ -170,7 +170,7 @@ func (re *Registry) moduleStream(w http.ResponseWriter, r *http.Request) {
 	defer content.Close()
 
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=terraform-provider_%s_%s.zip", osName, arch))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=terraform-provider_%s_%s.zip", "", ""))
 
 	buf := make([]byte, 32*1024) // 32KB buffer
 	written, err := io.CopyBuffer(w, content, buf)
