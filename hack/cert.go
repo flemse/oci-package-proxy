@@ -1,4 +1,4 @@
-package devcert
+package main
 
 import (
 	"crypto/ecdsa"
@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func GenerateCert() {
+func main() {
 	if _, err := os.ReadFile("tmp/cert.pem"); !os.IsNotExist(err) {
 		log.Println("cert.pem already exists, skipping generation.")
 		return
@@ -35,7 +35,7 @@ func GenerateCert() {
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              []string{"localhost"},
+		DNSNames:              []string{"localhost", "localhost.test"},
 	}
 
 	// Self-sign the certificate
@@ -45,7 +45,7 @@ func GenerateCert() {
 	}
 
 	// Write the certificate to cert.pem
-	certFile, err := os.Create("cert.pem")
+	certFile, err := os.Create("tmp/cert.pem")
 	if err != nil {
 		log.Fatalf("Failed to open cert.pem for writing: %v", err)
 	}
@@ -55,7 +55,7 @@ func GenerateCert() {
 	}
 
 	// Write the private key to key.pem
-	keyFile, err := os.Create("key.pem")
+	keyFile, err := os.Create("tmp/key.pem")
 	if err != nil {
 		log.Fatalf("Failed to open key.pem for writing: %v", err)
 	}
@@ -69,4 +69,8 @@ func GenerateCert() {
 	}
 
 	log.Println("Self-signed certificate and private key generated: cert.pem, key.pem")
+
+	log.Print(`To trust the certificate, add it to your system's trusted root CA store.
+On MacOS, you can do this by running:
+  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain tmp/cert.pem`)
 }

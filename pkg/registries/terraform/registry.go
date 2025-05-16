@@ -13,7 +13,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/flemse/oci-package-proxy/pkg/registries/auth"
+	"github.com/flemse/oci-package-proxy/pkg/registries/terraform/auth"
 	"github.com/flemse/oci-package-proxy/pkg/store"
 	"github.com/go-chi/chi/v5"
 	orasauth "oras.land/oras-go/v2/registry/remote/auth"
@@ -55,13 +55,6 @@ type DownloadResponse struct {
 	SigningKeys         SigningKeyList `json:"signing_keys"`
 }
 
-var (
-	Modules   []Module
-	Providers = []Provider{
-		{Name: "novus/applicationmanagement", Version: []string{"0.3.0"}},
-	}
-)
-
 type Registry struct {
 	OCIHost       string
 	OrgKey        string
@@ -89,9 +82,12 @@ func NewRegistry(ociHost, orgKey string, allowInsecure bool, packageList *Packag
 func (re *Registry) SetupRoutes(mux chi.Router) {
 	mux.HandleFunc("/v1/providers/{namespace}/{type}/versions", re.providerVersions)
 	mux.HandleFunc("/v1/providers/{namespace}/{type}/{version}/download/{os}/{arch}", re.providerDownload)
+	mux.HandleFunc("/v1/modules/{namespace}/{name}/{system}/versions", re.moduleVersions)
+	mux.HandleFunc("/v1/modules/{namespace}/{name}/{system}/{version}/download", re.moduleDownload)
 	mux.HandleFunc("/_providers/{namespace}/{type}/{version}/{os}/{arch}/shasum", re.providerShasum)
 	mux.HandleFunc("/_providers/{namespace}/{type}/{version}/{os}/{arch}/shasum.sig", re.providerShasumSig)
 	mux.HandleFunc("/_providers/{namespace}/{type}/{version}/{os}/{arch}/stream", re.providerStream) // New route
+	mux.HandleFunc("/_modules/{namespace}/{name}/{system}/{version}/stream", re.moduleStream)        // New route
 	mux.HandleFunc("/v1/login", re.HandleLogin)
 	mux.HandleFunc("/.well-known/terraform.json", re.HandleWellKnownTerraform)
 }
@@ -135,6 +131,58 @@ func (re *Registry) providerShasumSig(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(sig)
+}
+
+func (re *Registry) moduleStream(w http.ResponseWriter, r *http.Request) {
+	//ns := r.PathValue("namespace")
+	//name := r.PathValue("name")
+	//system := r.PathValue("system")
+	version := r.PathValue("version")
+	encryptedToken := r.URL.Query().Get("token")
+
+	var creds *orasauth.Credential
+	if encryptedToken != "" {
+		token, err := auth.Decrypt(re.key, encryptedToken, generateFingerprint(r))
+		if err != nil {
+			log.Printf("Error decrypting token: %v", err)
+			http.Error(w, "Error decrypting token", http.StatusInternalServerError)
+			return
+		}
+		creds = &orasauth.Credential{
+			Username: "oauth2",
+			Password: token,
+		}
+	}
+
+	ociStore, err := store.NewStore(re.OCIHost, re.packageName(r), creds, re.allowInsecure)
+	if err != nil {
+		log.Printf("Error creating OCI store: %v", err)
+		http.Error(w, "Error creating OCI store", http.StatusInternalServerError)
+		return
+	}
+
+	content, err := ociStore.GetFileContent(r.Context(), "v"+version, "", "")
+	if err != nil {
+		log.Printf("Error getting file content: %v", err)
+		http.Error(w, "Error getting file content", http.StatusInternalServerError)
+		return
+	}
+	defer content.Close()
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=terraform-provider_%s_%s.zip", osName, arch))
+
+	buf := make([]byte, 32*1024) // 32KB buffer
+	written, err := io.CopyBuffer(w, content, buf)
+	if err != nil {
+		log.Printf("Error writing file content: %v", err)
+		// We can't send an HTTP error here as headers have already been sent
+		if written > 0 {
+			log.Printf("Partial write: %d bytes written before error", written)
+		}
+		// Don't exit the handler until copy is complete or fails
+		return
+	}
 }
 
 func (re *Registry) providerStream(w http.ResponseWriter, r *http.Request) {
@@ -250,6 +298,76 @@ func (re *Registry) providerDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (re *Registry) providerVersions(w http.ResponseWriter, r *http.Request) {
+	creds := credsFromRequest(r)
+	ociStore, err := store.NewStore(re.OCIHost, re.packageName(r), creds, re.allowInsecure)
+	if err != nil {
+		log.Printf("Error creating OCI store: %v", err)
+		http.Error(w, "Error creating OCI store", http.StatusInternalServerError)
+		return
+	}
+
+	versions, err := ociStore.Versions(r.Context())
+	if err != nil {
+		log.Printf("Error getting versions: %v", err)
+		http.Error(w, "Error getting versions", http.StatusInternalServerError)
+		return
+	}
+
+	var response VersionsResponse
+	for _, v := range versions {
+		response.Versions = append(response.Versions, VersionDetail{
+			Version:   v,
+			Protocols: []string{"5.0"}, // Example protocol version
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (re *Registry) moduleDownload(w http.ResponseWriter, r *http.Request) {
+	ns := r.PathValue("namespace")
+	name := r.PathValue("name")
+	system := r.PathValue("system")
+	version := r.PathValue("version")
+	creds := credsFromRequest(r)
+
+	ociStore, err := store.NewStore(re.OCIHost, re.packageName(r), creds, re.allowInsecure)
+	if err != nil {
+		log.Printf("Error creating OCI store: %v", err)
+		http.Error(w, "Error creating OCI store", http.StatusInternalServerError)
+		return
+	}
+
+	token := ""
+	if creds != nil {
+		t, err := auth.Encrypt(re.key, creds.Password, generateFingerprint(r))
+		if err != nil {
+			log.Printf("Error encrypting token: %v", err)
+			http.Error(w, "Error encrypting token", http.StatusInternalServerError)
+			return
+		}
+		token = t
+	}
+
+	_, err = ociStore.DownloadUrlForPlatform(r.Context(), "v"+version, "", "")
+	if err != nil {
+		log.Printf("Error getting download URL: %v", err)
+		http.Error(w, "Error getting download URL", http.StatusInternalServerError)
+		return
+	}
+
+	downloadURL := fmt.Sprintf("/_modules/%s/%s/%s/%s/stream", ns, name, system, version)
+	if token != "" {
+		downloadURL += "?token=" + token
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Terraform-Get", downloadURL)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (re *Registry) moduleVersions(w http.ResponseWriter, r *http.Request) {
 	creds := credsFromRequest(r)
 	ociStore, err := store.NewStore(re.OCIHost, re.packageName(r), creds, re.allowInsecure)
 	if err != nil {
