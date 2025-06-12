@@ -6,3 +6,13 @@ terraform {
     }
   }
 }
+
+module "test" {
+  source = "terraform-aws-modules/vpc/aws"
+  version = "3.14.0"
+}
+
+module "test2" {
+  source = "terraform-aws-modules/vpc/aws"
+  version = "3.14.0"
+}

@@ -30,6 +30,11 @@ type ManifestConfig struct {
 	Architecture string `json:"architecture"`
 }
 
+type Blob struct {
+	descriptor ocispec.Descriptor
+	data       []byte
+}
+
 var generateCmd = &cobra.Command{
 	Use:   "generate",
 	Short: "Generate OCI manifest list for zip files in the dist directory",
@@ -70,7 +75,7 @@ var generateCmd = &cobra.Command{
 
 		foundShasum := false
 		foundSig := false
-		//createdAt := time.Now().Format(time.RFC3339)
+
 		err := filepath.WalkDir(inputPath, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -90,14 +95,16 @@ var generateCmd = &cobra.Command{
 				}
 				defer file.Close()
 
-				data, err := io.ReadAll(file)
+				blob, err := descriptorWithData(file)
 				if err != nil {
-					log.Printf("Failed to read file %s: %v", path, err)
+					log.Printf("Failed to create descriptor for %s: %v", path, err)
 					return nil
 				}
-				encodedShasum := base64.StdEncoding.EncodeToString(data)
+
+				encodedShasum := base64.StdEncoding.EncodeToString(blob.data)
 				innerImageIndex.Annotations[store.ShasumAnnotation] = encodedShasum
 			}
+
 			if strings.HasSuffix(d.Name(), "SHA256SUMS.sig") {
 				foundSig = true
 				file, err := os.Open(path)
@@ -107,18 +114,16 @@ var generateCmd = &cobra.Command{
 				}
 				defer file.Close()
 
-				data, err := io.ReadAll(file)
+				blob, err := descriptorWithData(file)
 				if err != nil {
-					log.Printf("Failed to read file %s: %v", path, err)
+					log.Printf("Failed to create descriptor for %s: %v", path, err)
 					return nil
 				}
-				encodedSig := base64.StdEncoding.EncodeToString(data)
+				encodedSig := base64.StdEncoding.EncodeToString(blob.data)
 				innerImageIndex.Annotations[store.ShasumSignatureAnnotation] = encodedSig
 			}
 
-			// Process only .zip files
 			if strings.HasSuffix(d.Name(), ".zip") {
-				// Open the file to calculate size and digest
 				file, err := os.Open(path)
 				if err != nil {
 					log.Printf("Failed to open file %s: %v", path, err)
@@ -126,38 +131,23 @@ var generateCmd = &cobra.Command{
 				}
 				defer file.Close()
 
-				// Get file info
-				info, err := file.Stat()
+				blob, err := descriptorWithData(file)
 				if err != nil {
-					log.Printf("Failed to get file info for %s: %v", path, err)
+					log.Printf("Failed to create descriptor for %s: %v", path, err)
 					return nil
 				}
 
-				layerData, err := io.ReadAll(file)
-				if err != nil {
-					fmt.Printf("Error reading file: %v\n", err)
-					return nil
-				}
-				layerDigest := digest.FromBytes(layerData)
-				// Copy the file to blobs/sha256 with the digest as the filename
-				blobPath := filepath.Join(blobsDir, layerDigest.Encoded())
+				blobPath := filepath.Join(blobsDir, blob.descriptor.Digest.Encoded())
 				if _, err := file.Seek(0, io.SeekStart); err != nil {
 					log.Printf("Failed to reset file pointer for %s: %v", path, err)
 					return nil
 				}
-				blobFile, err := os.Create(blobPath)
-				if err != nil {
-					log.Printf("Failed to create blob file %s: %v", blobPath, err)
-					return nil
-				}
-				defer blobFile.Close()
 
-				if _, err := io.Copy(blobFile, file); err != nil {
-					log.Printf("Failed to copy file to blob %s: %v", blobPath, err)
+				if err := os.WriteFile(blobPath, blob.data, 0666); err != nil {
+					log.Printf("Failed to write blob file %s: %v", blobPath, err)
 					return nil
 				}
 
-				// Extract OS and architecture from the filename
 				parts := strings.Split(d.Name(), "_")
 				if len(parts) < 4 {
 					log.Printf("Invalid filename format for %s", d.Name())
@@ -183,7 +173,7 @@ var generateCmd = &cobra.Command{
 				}
 				annotations := map[string]string{
 					store.FileNameAnnotation:   d.Name(),
-					store.FileDigestAnnotation: layerDigest.Encoded(),
+					store.FileDigestAnnotation: blob.descriptor.Digest.Encoded(),
 				}
 				manifest := ocispec.Manifest{
 					Versioned: specs.Versioned{SchemaVersion: 2},
@@ -196,8 +186,8 @@ var generateCmd = &cobra.Command{
 					Layers: []ocispec.Descriptor{
 						{
 							MediaType: ocispec.MediaTypeImageLayerGzip,
-							Size:      info.Size(),
-							Digest:    layerDigest,
+							Size:      blob.descriptor.Size,
+							Digest:    blob.descriptor.Digest,
 						},
 					},
 					Annotations: annotations,
@@ -283,6 +273,20 @@ var generateCmd = &cobra.Command{
 
 		log.Printf("OCI layout created at %s", outPath)
 	},
+}
+
+func descriptorWithData(f *os.File) (Blob, error) {
+	d, err := io.ReadAll(f)
+	if err != nil {
+		return Blob{}, fmt.Errorf("failed to read file: %w", err)
+	}
+	return Blob{
+		descriptor: ocispec.Descriptor{
+			Digest: digest.FromBytes(d),
+			Size:   int64(len(d)),
+		},
+		data: d,
+	}, nil
 }
 
 func init() {
