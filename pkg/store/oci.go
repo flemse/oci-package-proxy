@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 
+	_package "github.com/flemse/oci-package-proxy/pkg/config"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
@@ -36,13 +37,13 @@ type DownloadInfo struct {
 	Digest   string
 }
 
-func NewStore(ociHost, packageName string, creds *auth.Credential, allowInsecure bool) (*Store, error) {
-	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", ociHost, packageName))
+func NewStore(cfg *_package.HostConfig, packageName string, creds *auth.Credential) (*Store, error) {
+	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", cfg.Host, packageName))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create repository: %w", err)
 	}
 
-	repo.PlainHTTP = allowInsecure
+	repo.PlainHTTP = cfg.AllowInsecure
 	c := auth.DefaultClient
 	if creds != nil {
 		c.Credential = func(ctx context.Context, hostport string) (auth.Credential, error) {

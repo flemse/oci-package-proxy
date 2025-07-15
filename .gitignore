@@ -1,5 +1,5 @@
 .idea
 tmp/
 data/
-example/.terraform*
+.terraform.*
 .DS_Store

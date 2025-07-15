@@ -6,6 +6,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/flemse/oci-package-proxy/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/oci"
@@ -46,9 +47,12 @@ func TestManifest(t *testing.T) {
 
 func TestShasumsFromIndex(t *testing.T) {
 	ctx := context.Background()
-	host := "localhost:5001"
-	repoName := "appmgmt"
-	oci, err := NewStore(host, repoName, nil, true)
+	cfg := &config.HostConfig{
+		AllowInsecure: true,
+		Host:          "localhost:5001",
+		OrgKey:        "",
+	}
+	oci, err := NewStore(cfg, "appmgmt", nil)
 	assert.NoError(t, err)
 
 	shasums, err := oci.Shasums(ctx, "v1")
@@ -58,9 +62,13 @@ func TestShasumsFromIndex(t *testing.T) {
 
 func TestDownloadUrlsFromIndex(t *testing.T) {
 	ctx := context.Background()
-	host := "localhost:5001"
-	repoName := "appmgmt"
-	oci, err := NewStore(host, repoName, nil, true)
+	cfg := &config.HostConfig{
+		AllowInsecure: true,
+		Host:          "localhost:5001",
+		OrgKey:        "appmgmt",
+	}
+
+	oci, err := NewStore(cfg, "appmgmt", nil)
 	assert.NoError(t, err)
 
 	urls, err := oci.DownloadUrls(ctx, "v1")
@@ -72,9 +80,15 @@ func TestGetOciStore(t *testing.T) {
 	store, err := oci.New(t.TempDir())
 	assert.NoError(t, err)
 	ctx := context.Background()
-	host := "localhost:5001"
+	cfg := &config.HostConfig{
+		AllowInsecure: true,
+		Host:          "localhost:5001",
+		OrgKey:        "",
+	}
+
 	repoName := "appmgmt"
-	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", host, repoName))
+
+	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", cfg.Host, repoName))
 	repo.PlainHTTP = true
 	assert.NoError(t, err)
 	// 2. Copy from the remote repository to the OCI layout store
@@ -86,12 +100,18 @@ func TestGetOciStore(t *testing.T) {
 
 func TestGetVersions(t *testing.T) {
 	ctx := context.Background()
-	host := "localhost:5001"
+
+	cfg := &config.HostConfig{
+		AllowInsecure: true,
+		Host:          "localhost:5001",
+		OrgKey:        "",
+	}
+
 	repoName := "novus/applicationmanagement"
-	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", host, repoName))
+	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", cfg.Host, repoName))
 	repo.PlainHTTP = true
 	assert.NoError(t, err)
-	oci, err := NewStore(host, repoName, nil, true)
+	oci, err := NewStore(cfg, repoName, nil)
 	assert.NoError(t, err)
 
 	versions, err := oci.Versions(ctx)

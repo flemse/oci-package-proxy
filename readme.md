@@ -7,7 +7,7 @@ This application will help converting various package types like terraform provi
 brew install oras
 
 # Setup the registry
-docker run -d --rm -p 5001:5000 --name tf-oci ghcr.io/project-zot/zot:latest
+docker run -d --rm -it -p 5001:5000 --name tf-oci ghcr.io/project-zot/zot:latest
 ```
 
 ## Examples
@@ -24,4 +24,20 @@ go run . registry --oci-host localhost:5001 --oci-insecure
 
 # start proxy with remote registry
 GITHUB_TOKEN=token go run . registry --repo-name lego/novus/applicationmanagement
+```
+
+## Running locally
+
+```bash
+# start registry - visit at http://localhost:5001
+docker run -d --rm -p 5001:5000 --name tf-oci ghcr.io/project-zot/zot:latest
+
+# start proxy
+go run . registry --oci-host localhost:5001 --oci-insecure
+```
+
+## Terraform using proxy
+
+```bash
+terraform -chdir=example/terraform plan
 ```

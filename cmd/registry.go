@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/http"
 
+	"github.com/flemse/oci-package-proxy/pkg/config"
+	"github.com/flemse/oci-package-proxy/pkg/registries/python"
 	"github.com/flemse/oci-package-proxy/pkg/registries/terraform"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -33,12 +35,17 @@ var registryCmd = &cobra.Command{
 		r.Use(middleware.Logger)
 		r.Use(middleware.Recoverer)
 
-		packageList, err := terraform.LoadPackageConfig(packageConfigFile)
+		packageList, err := config.LoadPackageConfig(packageConfigFile)
 		if err != nil {
 			log.Fatalf("failed to load package config: %v", err)
 		}
+		hostCfg := &config.HostConfig{
+			Host:          hostOCI,
+			AllowInsecure: allowInsecureOCI,
+			OrgKey:        orgName,
+		}
 
-		reg := terraform.NewRegistry(hostOCI, orgName, allowInsecureOCI, packageList)
+		reg := terraform.NewRegistry(hostCfg, packageList)
 		reg.SetupRoutes(r)
 
 		addr := net.JoinHostPort("", port)
@@ -46,6 +53,9 @@ var registryCmd = &cobra.Command{
 		if skipTLS {
 			log.Fatal(http.ListenAndServe(addr, r))
 		}
+
+		pyReg := python.NewRegistry(hostOCI, orgName, allowInsecureOCI, packageList)
+		pyReg.SetupRoutes(r)
 
 		log.Fatal(http.ListenAndServeTLS(addr, certFilePath, keyFilePath, r))
 	},

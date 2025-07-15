@@ -1,4 +1,4 @@
-package terraform
+package config
 
 import (
 	"fmt"
@@ -8,8 +8,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type PackageType string
+
+const (
+	PackageTypeTerraform PackageType = "terraform"
+	PackageTypePython    PackageType = "python"
+)
+
 type Package struct {
 	Name        string        `json:"name" yaml:"name"`
+	Type        PackageType   `json:"type" yaml:"type"`
 	SigningKeys []*SigningKey `json:"signing_keys" yaml:"signingKeys"`
 }
 
@@ -24,6 +32,12 @@ type SigningKey struct {
 
 type PackageList struct {
 	Packages []Package `json:"packages" yaml:"packages"`
+}
+
+type HostConfig struct {
+	Host          string
+	OrgKey        string
+	AllowInsecure bool
 }
 
 func LoadPackageConfig(path string) (*PackageList, error) {
