@@ -1,5 +1,7 @@
 .idea
 tmp/
 data/
+dist/
+e2e/*/docs/
 .terraform.*
 .DS_Store
