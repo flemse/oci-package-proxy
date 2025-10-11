@@ -34,10 +34,23 @@ func (re *Registry) SetupRoutes(mux chi.Router) {
 }
 
 func (re *Registry) handleSimpleIndex(w http.ResponseWriter, r *http.Request) {
-	// List available versions for a package (PyPI simple index)
-	// ...stub: respond with a minimal HTML index...
+	// Build a list of all Python packages from the PackageList
+	var pythonPackages []string
+	if re.PackageList != nil {
+		for _, pkg := range re.PackageList.Packages {
+			if pkg.Type == config.PackageTypePython {
+				pythonPackages = append(pythonPackages, pkg.Name)
+			}
+		}
+	}
+
+	// Return PyPI simple index HTML listing all Python packages
 	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte("<html><body><a href='/packages/example-0.1.0.tar.gz'>example-0.1.0.tar.gz</a></body></html>"))
+	w.Write([]byte("<!DOCTYPE html>\n<html>\n<body>\n"))
+	for _, pkgName := range pythonPackages {
+		w.Write([]byte("<a href='/simple/" + pkgName + "/'>" + pkgName + "</a><br/>\n"))
+	}
+	w.Write([]byte("</body>\n</html>"))
 }
 
 func (re *Registry) handlePackageDownload(w http.ResponseWriter, r *http.Request) {
