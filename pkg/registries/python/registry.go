@@ -1,15 +1,65 @@
 package python
 
 import (
+	"html/template"
 	"io"
 	"log"
 	"net/http"
+	"regexp"
+	"strings"
 
 	"github.com/flemse/oci-package-proxy/pkg/config"
 	"github.com/flemse/oci-package-proxy/pkg/core"
 	"github.com/flemse/oci-package-proxy/pkg/store"
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 )
+
+// normalizePackageName normalizes a Python package name according to PEP 503
+// It converts to lowercase and replaces runs of [-_.] with a single dash
+func normalizePackageName(name string) string { // todo: remove this crap, we should be standard compliant when parsing the package list, not retroactively!
+	name = strings.ToLower(name)
+	re := regexp.MustCompile(`[-_.]+`)
+	return re.ReplaceAllString(name, "-")
+}
+
+// Template for the simple package index page
+var simpleIndexTemplate = template.Must(template.New("simpleIndex").Parse(`<!DOCTYPE html>
+<html>
+<head>
+<title>Links for {{.PackageName}}</title>
+</head>
+<body>
+<h1>Links for {{.PackageName}}</h1>
+{{range .Links}}
+<a href="{{.URL}}">{{.Filename}}</a><br/>
+{{end}}
+</body>
+</html>`))
+
+// Template for the simple index root page
+var simpleIndexRootTemplate = template.Must(template.New("simpleIndexRoot").Parse(`<!DOCTYPE html>
+<html>
+<body>
+{{range .Packages}}
+<a href="/simple/{{.}}/">{{.}}</a><br/>
+{{end}}
+</body>
+</html>`))
+
+type DownloadLink struct {
+	Filename string
+	URL      string
+}
+
+type simpleIndexData struct {
+	PackageName string
+	Links       []DownloadLink
+}
+
+type simpleIndexRootData struct {
+	Packages []string
+}
 
 type Registry struct {
 	HostConfig  *config.HostConfig
@@ -25,22 +75,28 @@ func NewRegistry(hostConfig *config.HostConfig, packageList *config.PackageList)
 	}
 }
 
-func (re *Registry) SetupRoutes(mux chi.Router) {
-	mux.Get("/simple/{package}", re.handleSimpleIndex)
-	mux.Get("/simple", re.handleSimpleIndexRoot)
-	mux.Get("/packages/{filename}", re.handlePackageDownload)
-	mux.Post("/upload/", re.handlePackageUpload)
+func (re *Registry) SetupRoutes(r chi.Router) {
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.StripSlashes)
+		r.Get("/simple/{package}/", re.handleSimpleIndex)
+		r.Get("/simple/", re.handleSimpleIndexRoot)
+		r.Get("/packages/{filename}", re.handlePackageDownload)
+		r.Post("/upload/", re.handlePackageUpload)
+	})
 }
 
 func (re *Registry) handleSimpleIndex(w http.ResponseWriter, r *http.Request) {
 	packageName := r.PathValue("package")
+	normalizedRequestName := normalizePackageName(packageName)
 
-	// Check if the package exists in the PackageList
+	// Check if the package exists in the PackageList (using normalized names for comparison)
 	var packageExists bool
+	var actualPackageName string
 	if re.PackageList != nil {
 		for _, pkg := range re.PackageList.Packages {
-			if pkg.Type == config.PackageTypePython && pkg.Name == packageName {
+			if pkg.Type == config.PackageTypePython && normalizePackageName(pkg.Name) == normalizedRequestName {
 				packageExists = true
+				actualPackageName = pkg.Name
 				break
 			}
 		}
@@ -51,11 +107,11 @@ func (re *Registry) handleSimpleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get credentials and create OCI store
+	// Get credentials and create OCI store using the actual package name from config
 	creds := re.creds.FromRequest(r)
-	ociStore, err := store.NewStore(re.HostConfig, packageName, creds)
+	ociStore, err := store.NewStore(re.HostConfig, actualPackageName, creds)
 	if err != nil {
-		log.Printf("Error creating OCI store for package %s: %v", packageName, err)
+		log.Printf("Error creating OCI store for package %s: %v", actualPackageName, err)
 		http.Error(w, "Error creating OCI store", http.StatusInternalServerError)
 		return
 	}
@@ -63,16 +119,22 @@ func (re *Registry) handleSimpleIndex(w http.ResponseWriter, r *http.Request) {
 	// Get all versions/tags for this package
 	versions, err := ociStore.Versions(r.Context())
 	if err != nil {
-		log.Printf("Error fetching versions for package %s: %v", packageName, err)
-		http.Error(w, "Error fetching package versions", http.StatusInternalServerError)
-		return
+		// If the repository doesn't exist yet (404), return an empty package list
+		// This is normal for packages that haven't been uploaded yet
+		log.Printf("Warning: Could not fetch versions for package %s: %v (returning empty list)", actualPackageName, err)
+		versions = []string{}
 	}
 
-	// Build list of all download URLs for all versions
-	var downloadLinks []struct {
-		Filename string
-		URL      string
+	// Build the base URL for absolute links (required for proper pip resolution)
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
 	}
+	baseURL := scheme + "://" + r.Host
+
+	// Build list of all download URLs for all versions
+	// Point to /packages/{filename} endpoint instead of direct OCI URLs
+	var downloadLinks []DownloadLink
 
 	for _, version := range versions {
 		urls, err := ociStore.DownloadUrls(r.Context(), version)
@@ -81,26 +143,26 @@ func (re *Registry) handleSimpleIndex(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		for filename, url := range urls {
-			downloadLinks = append(downloadLinks, struct {
-				Filename string
-				URL      string
-			}{
+		for filename := range urls {
+			// Use absolute URL for package download
+			downloadLinks = append(downloadLinks, DownloadLink{
 				Filename: filename,
-				URL:      url,
+				URL:      baseURL + "/packages/" + filename,
 			})
 		}
 	}
 
 	// Return PyPI simple index HTML for this package
 	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte("<!DOCTYPE html>\n<html>\n<head>\n<title>Links for " + packageName + "</title>\n</head>\n<body>\n<h1>Links for " + packageName + "</h1>\n"))
 
-	for _, link := range downloadLinks {
-		w.Write([]byte("<a href='" + link.URL + "'>" + link.Filename + "</a><br/>\n"))
+	data := simpleIndexData{
+		PackageName: packageName,
+		Links:       downloadLinks,
 	}
 
-	w.Write([]byte("</body>\n</html>"))
+	if err := simpleIndexTemplate.Execute(w, data); err != nil {
+		http.Error(w, "Error rendering template", http.StatusInternalServerError)
+	}
 }
 
 func (re *Registry) handleSimpleIndexRoot(w http.ResponseWriter, r *http.Request) {
@@ -116,32 +178,112 @@ func (re *Registry) handleSimpleIndexRoot(w http.ResponseWriter, r *http.Request
 
 	// Return PyPI simple index HTML listing all Python packages
 	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte("<!DOCTYPE html>\n<html>\n<body>\n"))
-	for _, pkgName := range pythonPackages {
-		w.Write([]byte("<a href='/simple/" + pkgName + "/'>" + pkgName + "</a><br/>\n"))
+
+	data := simpleIndexRootData{
+		Packages: pythonPackages,
 	}
-	w.Write([]byte("</body>\n</html>"))
+
+	if err := simpleIndexRootTemplate.Execute(w, data); err != nil {
+		http.Error(w, "Error rendering template", http.StatusInternalServerError)
+	}
 }
 
 func (re *Registry) handlePackageDownload(w http.ResponseWriter, r *http.Request) {
 	filename := chi.URLParam(r, "filename")
+
+	// Extract package name from filename
+	// Python wheel format: {distribution}-{version}(-{build tag})?-{python tag}-{abi tag}-{platform tag}.whl
+	// Source dist format: {name}-{version}.tar.gz or .zip
+
+	// Find the package in our PackageList by matching normalized names
+	var packageName string
+	var found bool
+
+	if re.PackageList != nil {
+		for _, pkg := range re.PackageList.Packages {
+			if pkg.Type == config.PackageTypePython {
+				// Check if the filename starts with the normalized package name
+				normalizedPkg := normalizePackageName(pkg.Name)
+				normalizedFilename := normalizePackageName(filename)
+				if strings.HasPrefix(normalizedFilename, normalizedPkg+"-") {
+					packageName = pkg.Name
+					found = true
+					break
+				}
+			}
+		}
+	}
+
+	if !found {
+		log.Printf("Error: could not determine package name from filename: %s", filename)
+		http.Error(w, "Package not found", http.StatusNotFound)
+		return
+	}
+
 	creds := re.creds.FromRequest(r)
-	ociStore, err := store.NewStore(re.HostConfig, filename, creds)
+	ociStore, err := store.NewStore(re.HostConfig, packageName, creds)
 	if err != nil {
-		log.Printf("Error creating OCI store: %v", err)
+		log.Printf("Error creating OCI store for package %s: %v", packageName, err)
 		http.Error(w, "Error creating OCI store", http.StatusInternalServerError)
 		return
 	}
-	content, err := ociStore.GetFileContent(r.Context(), "latest", "", "")
+
+	// Get all versions and find the one containing this file
+	versions, err := ociStore.Versions(r.Context())
+	if err != nil {
+		log.Printf("Error fetching versions for package %s: %v", packageName, err)
+		http.Error(w, "Error fetching package versions", http.StatusInternalServerError)
+		return
+	}
+
+	// Search through all versions to find the one containing this file
+	var fileVersion string
+	for _, version := range versions {
+		urls, err := ociStore.DownloadUrls(r.Context(), version)
+		if err != nil {
+			log.Printf("Warning: Could not fetch download URLs for version %s: %v", version, err)
+			continue
+		}
+
+		// Check if this version has the requested file
+		if _, exists := urls[filename]; exists {
+			fileVersion = version
+			break
+		}
+	}
+
+	if fileVersion == "" {
+		log.Printf("Error: file %s not found in any version of package %s", filename, packageName)
+		http.Error(w, "File not found", http.StatusNotFound)
+		return
+	}
+
+	// Stream the file content from OCI registry
+	content, err := ociStore.GetFileContent(r.Context(), fileVersion, "", "")
 	if err != nil {
 		log.Printf("Error getting file content: %v", err)
 		http.Error(w, "Error getting file content", http.StatusInternalServerError)
 		return
 	}
 	defer content.Close()
+
+	// Set appropriate headers for Python package download
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
-	io.Copy(w, content)
+
+	// Stream the content using a buffer like providerStream
+	buf := make([]byte, 32*1024) // 32KB buffer
+	written, err := io.CopyBuffer(w, content, buf)
+	if err != nil {
+		log.Printf("Error writing file content: %v", err)
+		// We can't send an HTTP error here as headers have already been sent
+		if written > 0 {
+			log.Printf("Partial write: %d bytes written before error", written)
+		}
+		return
+	}
+
+	log.Printf("Successfully streamed package file %s (%d bytes)", filename, written)
 }
 
 func (re *Registry) handlePackageUpload(w http.ResponseWriter, r *http.Request) {
