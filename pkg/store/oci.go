@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -9,7 +10,10 @@ import (
 	"strings"
 
 	_package "github.com/flemse/oci-package-proxy/pkg/config"
+	"github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
 )
@@ -183,4 +187,119 @@ func (s *Store) getProtocol() string {
 		return "http"
 	}
 	return "https"
+}
+
+// PushFile uploads a file to the OCI registry with the specified tag and metadata
+func (s *Store) PushFile(ctx context.Context, fileContent io.Reader, filename, tag string) error {
+	// Read the file content into memory to calculate digest
+	fileData, err := io.ReadAll(fileContent)
+	if err != nil {
+		return fmt.Errorf("failed to read file content: %w", err)
+	}
+
+	// Calculate digest using opencontainers/go-digest
+	blobDigest := digest.FromBytes(fileData)
+
+	// Create blob descriptor for the file
+	blobDesc := ocispec.Descriptor{
+		MediaType: "application/octet-stream",
+		Digest:    blobDigest,
+		Size:      int64(len(fileData)),
+	}
+
+	// Push the blob (file content)
+	if err := s.repo.Push(ctx, blobDesc, strings.NewReader(string(fileData))); err != nil {
+		return fmt.Errorf("failed to push blob: %w", err)
+	}
+
+	// Create empty config
+	emptyConfig := []byte("{}")
+	configDigest := digest.FromBytes(emptyConfig)
+	configDesc := ocispec.Descriptor{
+		MediaType: "application/vnd.oci.empty.v1+json",
+		Digest:    configDigest,
+		Size:      int64(len(emptyConfig)),
+	}
+
+	// Push the config
+	if err := s.repo.Push(ctx, configDesc, strings.NewReader(string(emptyConfig))); err != nil {
+		return fmt.Errorf("failed to push config: %w", err)
+	}
+
+	// Create manifest with the blob as a layer
+	manifest := ocispec.Manifest{
+		Versioned: specs.Versioned{SchemaVersion: 2},
+		MediaType: ocispec.MediaTypeImageManifest,
+		Config:    configDesc,
+		Layers:    []ocispec.Descriptor{blobDesc},
+		Annotations: map[string]string{
+			FileNameAnnotation:   filename,
+			FileDigestAnnotation: blobDigest.Encoded(),
+		},
+	}
+
+	// Marshal and push the manifest
+	manifestData, err := json.Marshal(manifest)
+	if err != nil {
+		return fmt.Errorf("failed to marshal manifest: %w", err)
+	}
+
+	manifestDigest := digest.FromBytes(manifestData)
+	manifestDesc := ocispec.Descriptor{
+		MediaType:    ocispec.MediaTypeImageManifest,
+		Digest:       manifestDigest,
+		Size:         int64(len(manifestData)),
+		ArtifactType: ArtifactType,
+		Platform: &ocispec.Platform{
+			OS:           "",
+			Architecture: "",
+		},
+		Annotations: map[string]string{
+			FileNameAnnotation:   filename,
+			FileDigestAnnotation: blobDigest.Encoded(),
+		},
+	}
+
+	if err := s.repo.Push(ctx, manifestDesc, strings.NewReader(string(manifestData))); err != nil {
+		return fmt.Errorf("failed to push manifest: %w", err)
+	}
+
+	// Create or update index
+	var index ocispec.Index
+	existingIndex, err := s.getIndex(ctx, tag)
+	if err == nil {
+		// Update existing index
+		index = *existingIndex
+		// Append the new manifest to the index
+		index.Manifests = append(index.Manifests, manifestDesc)
+	} else {
+		// Create new index
+		index = ocispec.Index{
+			Versioned: specs.Versioned{SchemaVersion: 2},
+			MediaType: ocispec.MediaTypeImageIndex,
+			Manifests: []ocispec.Descriptor{manifestDesc},
+		}
+	}
+
+	// Marshal and push the index
+	indexData, err := json.Marshal(index)
+	if err != nil {
+		return fmt.Errorf("failed to marshal index: %w", err)
+	}
+
+	indexDesc := content.NewDescriptorFromBytes(ocispec.MediaTypeImageIndex, indexData)
+
+	if err := s.repo.Push(ctx, indexDesc, strings.NewReader(string(indexData))); err != nil {
+		return fmt.Errorf("failed to push index: %w", err)
+	}
+
+	// Tag the index
+	if err := s.repo.Tag(ctx, indexDesc, tag); err != nil {
+		return fmt.Errorf("failed to tag index: %w", err)
+	}
+
+	_ = sha256.Sum256      // Keep import
+	_ = base64.StdEncoding // Keep import
+
+	return nil
 }

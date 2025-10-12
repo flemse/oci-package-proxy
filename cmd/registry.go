@@ -48,14 +48,14 @@ var registryCmd = &cobra.Command{
 		reg := terraform.NewRegistry(hostCfg, packageList)
 		reg.SetupRoutes(r)
 
+		pyReg := python.NewRegistry(hostCfg, packageList)
+		pyReg.SetupRoutes(r)
+
 		addr := net.JoinHostPort("", port)
 		log.Printf("Terraform Registry Server running on %s", addr)
 		if skipTLS {
 			log.Fatal(http.ListenAndServe(addr, r))
 		}
-
-		pyReg := python.NewRegistry(hostOCI, orgName, allowInsecureOCI, packageList)
-		pyReg.SetupRoutes(r)
 
 		log.Fatal(http.ListenAndServeTLS(addr, certFilePath, keyFilePath, r))
 	},

@@ -2,9 +2,39 @@ package testutils
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"io"
 	"strings"
+
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+func StartTestContainer(ctx context.Context) (string, error) {
+	req := testcontainers.ContainerRequest{
+		Image:        "ghcr.io/project-zot/zot:latest",
+		ExposedPorts: []string{"5000/tcp"},
+		WaitingFor:   wait.ForLog("starting task"),
+	}
+	zotContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	})
+	if err != nil {
+		return "", fmt.Errorf("could not start zot container: %w", err)
+	}
+	h, err := zotContainer.Host(ctx)
+	if err != nil {
+		return "", fmt.Errorf("could not get zot container host: %w", err)
+	}
+	p, err := zotContainer.MappedPort(ctx, "5000")
+	if err != nil {
+		return "", fmt.Errorf("could not get zot container port: %w", err)
+	}
+
+	return fmt.Sprintf("%s:%s", h, p.Port()), nil
+}
 
 func ReadExecOutput(reader io.Reader) string {
 	buf := new(bytes.Buffer)
