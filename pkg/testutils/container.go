@@ -61,3 +61,16 @@ func ReadExecOutput(reader io.Reader) string {
 	}
 	return strings.TrimSpace(result.String())
 }
+
+func StartPythonTestContainer(ctx context.Context) (testcontainers.Container, error) {
+	req := testcontainers.ContainerRequest{
+		Image:      "python:3.11-slim",
+		WaitingFor: wait.ForLog(""),
+		Cmd:        []string{"sleep", "infinity"},
+	}
+
+	return testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	})
+}
