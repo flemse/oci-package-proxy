@@ -1,0 +1,49 @@
+version: 2
+
+project_name: sample-provider
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: build
+    main: ./main.go
+    binary: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    flags:
+      - -trimpath
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+      - goos: darwin
+        goarch: '386'
+    hooks:
+      post:
+        - cp terraform-registry-manifest.json ./dist/{{ .ProjectName }}_{{ .Version }}_manifest.json
+
+archives:
+  - id: default
+    formats: [zip]
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+
+checksum:
+  extra_files:
+    - glob: 'terraform-registry-manifest.json'
+      name_template: '{{ .ProjectName }}_{{ .Version }}_manifest.json'
+  name_template: '{{ .ProjectName }}_{{ .Version }}_SHA256SUMS'
+  algorithm: sha256
+
+sboms:
+  - id: default
+
+changelog:
+  disable: true

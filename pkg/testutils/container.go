@@ -74,3 +74,29 @@ func StartPythonTestContainer(ctx context.Context) (testcontainers.Container, er
 		Started:          true,
 	})
 }
+
+func StartTerraformTestContainer(ctx context.Context) (testcontainers.Container, error) {
+	req := testcontainers.ContainerRequest{
+		Image:      "hashicorp/terraform:latest",
+		WaitingFor: wait.ForLog(""),
+		Cmd:        []string{"sleep", "infinity"},
+	}
+
+	return testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	})
+}
+
+func StartGoReleaserContainer(ctx context.Context) (testcontainers.Container, error) {
+	req := testcontainers.ContainerRequest{
+		Image:      "golang:1.25.1",
+		WaitingFor: wait.ForLog(""),
+		Cmd:        []string{"sleep", "infinity"},
+	}
+
+	return testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	})
+}
