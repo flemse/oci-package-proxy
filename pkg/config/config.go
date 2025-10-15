@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"os"
@@ -54,4 +55,18 @@ func LoadPackageConfig(path string) (*PackageList, error) {
 	}
 
 	return &packageList, nil
+}
+
+// ServerConfig holds the configuration for the registry server
+type ServerConfig struct {
+	Port              string
+	SkipTLS           bool
+	CertFilePath      string
+	KeyFilePath       string
+	TLSCert           *tls.Certificate // Optional: use this instead of file paths
+	HostOCI           string
+	OrgName           string
+	AllowInsecureOCI  bool
+	PackageConfigFile string
+	PackageList       *PackageList // Optional: use this instead of loading from file
 }

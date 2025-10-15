@@ -24,7 +24,6 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	"github.com/docker/docker/api/types"
-	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -328,16 +327,26 @@ func ImportGPGKeyToContainer(ctx context.Context, container testcontainers.Conta
 	return nil
 }
 
+// TrustSSLCertInContainer installs a certificate as trusted in a container
 func TrustSSLCertInContainer(t *testing.T, ctx context.Context, container testcontainers.Container, certPEM []byte) {
 	t.Helper()
+
 	// Copy the certificate to the container
 	err := container.CopyToContainer(ctx, certPEM, "/usr/local/share/ca-certificates/test-registry.crt", 0644)
-	require.NoError(t, err, "Failed to copy certificate to container")
+	if err != nil {
+		t.Fatalf("Failed to copy certificate to container: %v", err)
+	}
 
 	// Update the CA certificates
 	exitCode, output, err := container.Exec(ctx, []string{"update-ca-certificates"})
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("Failed to execute update-ca-certificates: %v", err)
+	}
+
 	outputStr := ReadExecOutput(output)
 	t.Logf("update-ca-certificates output: %s", outputStr)
-	require.Equal(t, 0, exitCode, "update-ca-certificates failed")
+
+	if exitCode != 0 {
+		t.Fatalf("update-ca-certificates failed with exit code %d: %s", exitCode, outputStr)
+	}
 }

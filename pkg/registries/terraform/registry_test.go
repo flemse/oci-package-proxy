@@ -14,6 +14,7 @@ import (
 	"github.com/flemse/oci-package-proxy/pkg/config"
 	"github.com/flemse/oci-package-proxy/pkg/testutils"
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	tcexec "github.com/testcontainers/testcontainers-go/exec"
@@ -215,6 +216,7 @@ resource "example_resource" "test" {
 	})
 }
 
+// StartProxyServer creates a test HTTP server for the Terraform registry
 func StartProxyServer(t *testing.T, ctx context.Context, pkg *config.PackageList) (*httptest.Server, error) {
 	t.Helper()
 
@@ -223,21 +225,28 @@ func StartProxyServer(t *testing.T, ctx context.Context, pkg *config.PackageList
 	require.NotEmpty(t, zotAddr, "Zot container address should not be empty")
 	t.Logf("Zot container running at: %s", zotAddr)
 
-	// Configure the registry to use Zot
-	cfg := &config.HostConfig{
+	// Configure the host
+	hostCfg := &config.HostConfig{
 		Host:          zotAddr,
 		AllowInsecure: true,
 		OrgKey:        "",
 	}
 
-	reg := NewRegistry(cfg, pkg)
-	mux := chi.NewRouter()
-	reg.SetupRoutes(mux)
+	// Create router and setup routes directly
+	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
 
-	s := httptest.NewServer(mux)
+	// Setup Terraform registry
+	tfReg := NewRegistry(hostCfg, pkg)
+	tfReg.SetupRoutes(r)
+
+	s := httptest.NewServer(r)
 	return s, nil
 }
 
+// StartProxyServerWithTLS creates a test HTTPS server for the Terraform registry
 func StartProxyServerWithTLS(t *testing.T, ctx context.Context, pkg *config.PackageList, tlsCert tls.Certificate) (*httptest.Server, error) {
 	t.Helper()
 
@@ -246,18 +255,24 @@ func StartProxyServerWithTLS(t *testing.T, ctx context.Context, pkg *config.Pack
 	require.NotEmpty(t, zotAddr, "Zot container address should not be empty")
 	t.Logf("Zot container running at: %s", zotAddr)
 
-	// Configure the registry to use Zot
-	cfg := &config.HostConfig{
+	// Configure the host
+	hostCfg := &config.HostConfig{
 		Host:          zotAddr,
 		AllowInsecure: true,
 		OrgKey:        "",
 	}
 
-	reg := NewRegistry(cfg, pkg)
-	mux := chi.NewRouter()
-	reg.SetupRoutes(mux)
+	// Create router and setup routes directly
+	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
 
-	s := httptest.NewUnstartedServer(mux)
+	// Setup Terraform registry
+	tfReg := NewRegistry(hostCfg, pkg)
+	tfReg.SetupRoutes(r)
+
+	s := httptest.NewUnstartedServer(r)
 	s.TLS = &tls.Config{
 		Certificates: []tls.Certificate{tlsCert},
 	}
