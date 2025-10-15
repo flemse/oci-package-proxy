@@ -1,6 +1,6 @@
 version: 2
 
-project_name: sample-provider
+project_name: terraform-provider-sample-provider
 
 before:
   hooks:
@@ -9,7 +9,7 @@ before:
 builds:
   - id: build
     main: ./main.go
-    binary: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    binary: '{{ .ProjectName }}_v{{ .Version }}'
     flags:
       - -trimpath
     env:
@@ -41,6 +41,19 @@ checksum:
       name_template: '{{ .ProjectName }}_{{ .Version }}_manifest.json'
   name_template: '{{ .ProjectName }}_{{ .Version }}_SHA256SUMS'
   algorithm: sha256
+
+signs:
+  - cmd: gpg
+    args:
+      - "--batch"
+      - "--local-user"
+      - "{{ .Env.GPG_FINGERPRINT }}"
+      - "--output"
+      - "${signature}"
+      - "--detach-sign"
+      - "${artifact}"
+    artifacts: checksum
+    output: true
 
 #sboms:
 #  - id: default

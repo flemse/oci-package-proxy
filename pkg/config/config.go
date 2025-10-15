@@ -27,7 +27,7 @@ type SigningKeyList struct {
 
 type SigningKey struct {
 	KeyID      string `json:"key_id" yaml:"keyID"`
-	AsciiArmor string `json:"ascii_armor" yaml:"asciiArmor"`
+	ASCIIArmor string `json:"ascii_armor" yaml:"asciiArmor"`
 }
 
 type PackageList struct {

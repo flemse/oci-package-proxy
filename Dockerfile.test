@@ -10,7 +10,8 @@ RUN apk add --no-cache \
     python3 \
     py3-pip \
     python3-dev \
-    build-base
+    build-base \
+    gnupg
 
 # Install Terraform
 RUN curl -Lo /tmp/terraform.zip https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip && \
@@ -30,4 +31,3 @@ WORKDIR /workspace
 
 # Keep container running
 CMD ["sleep", "infinity"]
-

@@ -23,10 +23,16 @@ if [ -z "$DIST_DIR" ] || [ -z "$UPLOAD_URL" ]; then
 fi
 
 SHASUM_FILE=$(ls "$DIST_DIR" | grep SHA256SUMS | head -1)
+SIG_FILE=$(ls "$DIST_DIR" | grep SHA256SUMS.sig | head -1)
 VERSION=$(echo "$SHASUM_FILE" | sed -e 's/^[^_]*_\([^_]*\)_SHA256SUMS$/\1/')
 ZIP_FILES=$(grep '\.zip$' "$DIST_DIR/$SHASUM_FILE" | awk '{print $2}')
 CURL_ARGS="-F namespace=test -F type=sample-provider -F version=$VERSION"
 CURL_ARGS="$CURL_ARGS -F SHA256SUMS=@$DIST_DIR/$SHASUM_FILE"
+
+# Add signature file if it exists
+if [ -n "$SIG_FILE" ] && [ -f "$DIST_DIR/$SIG_FILE" ]; then
+  CURL_ARGS="$CURL_ARGS -F SHA256SUMS.sig=@$DIST_DIR/$SIG_FILE"
+fi
 
 for zipfile in $ZIP_FILES; do
   CURL_ARGS="$CURL_ARGS -F $zipfile=@$DIST_DIR/$zipfile"

@@ -21,7 +21,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	"github.com/docker/docker/api/types"
+	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -243,4 +246,98 @@ func GenerateSelfSignedCert() (certPEM, keyPEM []byte, tlsCert tls.Certificate, 
 	}
 
 	return certPEM, keyPEM, tlsCert, nil
+}
+
+// GenerateGPGKey generates a GPG key pair for testing and returns the public key in ASCII armor format and fingerprint
+func GenerateGPGKey() (publicKeyArmor string, fingerprint string, privateKeyArmor string, err error) {
+	// Create a new entity with all required settings
+	name := "Test Key"
+	email := "test-key@example.com"
+	comment := ""
+
+	entity, err := openpgp.NewEntity(name, comment, email, nil)
+	if err != nil {
+		return "", "", "", fmt.Errorf("failed to create entity: %w", err)
+	}
+
+	// Export public key to ASCII armor
+	pubBuf := new(bytes.Buffer)
+	pubWriter, err := armor.Encode(pubBuf, openpgp.PublicKeyType, nil)
+	if err != nil {
+		return "", "", "", fmt.Errorf("failed to create armor encoder: %w", err)
+	}
+	err = entity.Serialize(pubWriter)
+	if err != nil {
+		pubWriter.Close()
+		return "", "", "", fmt.Errorf("failed to serialize public key: %w", err)
+	}
+	pubWriter.Close()
+	publicKeyArmor = pubBuf.String()
+
+	// Export private key to ASCII armor
+	privBuf := new(bytes.Buffer)
+	privWriter, err := armor.Encode(privBuf, openpgp.PrivateKeyType, nil)
+	if err != nil {
+		return "", "", "", fmt.Errorf("failed to create armor encoder for private key: %w", err)
+	}
+	err = entity.SerializePrivate(privWriter, nil)
+	if err != nil {
+		privWriter.Close()
+		return "", "", "", fmt.Errorf("failed to serialize private key: %w", err)
+	}
+	privWriter.Close()
+	privateKeyArmor = privBuf.String()
+
+	// Get fingerprint (hex-encoded)
+	fingerprint = fmt.Sprintf("%X", entity.PrimaryKey.Fingerprint)
+
+	return publicKeyArmor, fingerprint, privateKeyArmor, nil
+}
+
+// ImportGPGKeyToContainer imports a GPG private key into a container
+func ImportGPGKeyToContainer(ctx context.Context, container testcontainers.Container, privateKeyArmor, fingerprint string) error {
+	// Copy the private key to the container
+	err := container.CopyToContainer(ctx, []byte(privateKeyArmor), "/tmp/private-key.asc", 0600)
+	if err != nil {
+		return fmt.Errorf("failed to copy private key to container: %w", err)
+	}
+
+	// Import the key
+	exitCode, output, err := container.Exec(ctx, []string{"gpg", "--batch", "--import", "/tmp/private-key.asc"})
+	if err != nil {
+		return fmt.Errorf("failed to execute GPG import: %w", err)
+	}
+
+	outputStr := ReadExecOutput(output)
+	if exitCode != 0 {
+		return fmt.Errorf("GPG import failed (exit %d): %s", exitCode, outputStr)
+	}
+
+	// Trust the key ultimately
+	trustScript := fmt.Sprintf("echo '%s:6:' | gpg --import-ownertrust", fingerprint)
+	exitCode, output, err = container.Exec(ctx, []string{"sh", "-c", trustScript})
+	if err != nil {
+		return fmt.Errorf("failed to execute GPG trust: %w", err)
+	}
+
+	outputStr = ReadExecOutput(output)
+	if exitCode != 0 {
+		return fmt.Errorf("GPG trust failed (exit %d): %s", exitCode, outputStr)
+	}
+
+	return nil
+}
+
+func TrustSSLCertInContainer(t *testing.T, ctx context.Context, container testcontainers.Container, certPEM []byte) {
+	t.Helper()
+	// Copy the certificate to the container
+	err := container.CopyToContainer(ctx, certPEM, "/usr/local/share/ca-certificates/test-registry.crt", 0644)
+	require.NoError(t, err, "Failed to copy certificate to container")
+
+	// Update the CA certificates
+	exitCode, output, err := container.Exec(ctx, []string{"update-ca-certificates"})
+	require.NoError(t, err)
+	outputStr := ReadExecOutput(output)
+	t.Logf("update-ca-certificates output: %s", outputStr)
+	require.Equal(t, 0, exitCode, "update-ca-certificates failed")
 }
