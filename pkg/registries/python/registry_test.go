@@ -27,6 +27,7 @@ func TestHandleSimpleIndex(t *testing.T) {
 	}
 
 	s, err := StartProxyServer(t, t.Context(), packageList)
+	assert.NoError(t, err, "Failed to start proxy server")
 	t.Cleanup(s.Close)
 
 	c := s.Client()
@@ -94,9 +95,13 @@ func TestPythonPackageInContainer(t *testing.T) {
 	assert.NoError(t, err, "Failed to start proxy server")
 	t.Cleanup(s.Close)
 
-	pythonContainer, err := testutils.StartPythonTestContainer(ctx)
-	assert.NoError(t, err, "Failed to start Python container")
-	t.Cleanup(func() { _ = pythonContainer.Terminate(ctx) })
+	producerContainer, err := testutils.StartPythonTestContainer(ctx)
+	assert.NoError(t, err, "Failed to start Python producer container")
+	t.Cleanup(func() { _ = producerContainer.Terminate(ctx) })
+
+	consumerContainer, err := testutils.StartPythonTestContainer(ctx)
+	assert.NoError(t, err, "Failed to start Python consumer container")
+	t.Cleanup(func() { _ = consumerContainer.Terminate(ctx) })
 
 	uploadURL := s.URL + "/upload/"
 
@@ -104,28 +109,11 @@ func TestPythonPackageInContainer(t *testing.T) {
 	uploadURL = strings.Replace(uploadURL, "127.0.0.1", "host.docker.internal", 1)
 	uploadURL = strings.Replace(uploadURL, "localhost", "host.docker.internal", 1)
 
-	mainContent := `def hello_world():
-    return "Hello from test package!"`
-	err = pythonContainer.CopyToContainer(ctx, []byte(mainContent), "/tmp/producer/test_package/__init__.py", 0644)
+	err = producerContainer.CopyDirToContainer(ctx, "./sample/producer", "/workspace/", 0755)
 	assert.NoError(t, err)
 
-	pyproject := `[build-system]
-requires = ["setuptools", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "test-package"
-version = "0.1.0"
-description = "A test package for integration testing"
-requires-python = ">=3.6"
-
-[project.optional-dependencies]
-dev = ["build", "twine"]
-
-[tool.setuptools]
-packages = ["test_package"]`
-	err = pythonContainer.CopyToContainer(ctx, []byte(pyproject), "/tmp/producer/pyproject.toml", 0644)
-	assert.NoError(t, err)
+	err = consumerContainer.CopyDirToContainer(ctx, "./sample/consumer", "/workspace/", 0755)
+	assert.NoError(t, err, "Failed to copy consumer pyproject.toml to container")
 
 	pypirc := fmt.Sprintf(`[distutils]
 index-servers =
@@ -136,46 +124,22 @@ repository: %s
 username: user
 password: password`, uploadURL)
 
-	err = pythonContainer.CopyToContainer(ctx, []byte(pypirc), "/root/.pypirc", 0644)
+	err = producerContainer.CopyToContainer(ctx, []byte(pypirc), "/root/.pypirc", 0644)
 	assert.NoError(t, err, "Failed to copy .pypirc to container")
 
-	// Create a simple Python package structure inside the container
-	packageSetup := []struct {
-		name    string
-		command []string
-	}{
-		{
-			name:    "Install build tools and twine",
-			command: []string{"pip", "install", "--quiet", "build", "twine"},
-		},
-		{
-			name:    "Build the package",
-			command: []string{"sh", "-c", "cd /tmp/producer && python -m build"},
-		},
-	}
-
-	// Execute all setup commands
-	for _, step := range packageSetup {
-		t.Logf("Executing: %s", step.name)
-		exitCode, output, err := pythonContainer.Exec(ctx, step.command)
-		assert.NoError(t, err, "Failed to exec command: %s", step.name)
-
-		// Read output
-		outputStr := testutils.ReadExecOutput(output)
-
-		if exitCode != 0 {
-			t.Logf("Command output: %s", outputStr)
-		}
-		assert.Equal(t, 0, exitCode, "Command failed: %s\nOutput: %s", step.name, outputStr)
-	}
-
 	t.Run("PushPackage", func(t *testing.T) {
-		exitCode, output, err := pythonContainer.Exec(ctx, []string{
-			"sh", "-c", "cd /tmp/producer && twine upload --repository oci-package-proxy dist/test_package-0.1.0-py3-none-any.whl",
+		exitCode, output, err := producerContainer.Exec(ctx, []string{"sh", "-c", "cd /workspace/producer && python -m build"})
+		assert.NoError(t, err, "Failed to build")
+
+		outputStr := testutils.ReadExecOutput(output)
+		t.Logf("build output: %s", outputStr)
+
+		exitCode, output, err = producerContainer.Exec(ctx, []string{
+			"sh", "-c", "cd /workspace/producer && twine upload --repository oci-package-proxy dist/test_package-0.1.0-py3-none-any.whl",
 		})
 		assert.NoError(t, err, "Failed to upload package")
 
-		outputStr := testutils.ReadExecOutput(output)
+		outputStr = testutils.ReadExecOutput(output)
 		t.Logf("Upload output: %s", outputStr)
 
 		// Twine returns 0 on success
@@ -183,10 +147,6 @@ password: password`, uploadURL)
 	})
 
 	t.Run("InstallPackage", func(t *testing.T) {
-		installContainer, err := testutils.StartPythonTestContainer(ctx)
-		assert.NoError(t, err, "Failed to start installation container")
-		defer installContainer.Terminate(ctx)
-
 		// Get the simple index URL for pip to use
 		simpleIndexURL := s.URL + "/simple"
 		// Fix URL for container access
@@ -194,24 +154,8 @@ password: password`, uploadURL)
 		simpleIndexURL = strings.Replace(simpleIndexURL, "localhost", "host.docker.internal", 1)
 		t.Logf("Simple index URL for container: %s", simpleIndexURL)
 
-		pyproject := `[build-system]
-requires = ["setuptools", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "consumer"
-version = "0.1.0"
-description = "A consumer package that depends on test-package"
-requires-python = ">=3.6"
-dependencies = [
-    "test-package==0.1.0",
-]
-`
-		err = installContainer.CopyToContainer(ctx, []byte(pyproject), "/tmp/consumer/pyproject.toml", 0644)
-		assert.NoError(t, err, "Failed to copy consumer pyproject.toml to container")
-
-		exitCode, output, err := installContainer.Exec(ctx, []string{
-			"sh", "-c", fmt.Sprintf("cd /tmp/consumer && pip install --extra-index-url %s --trusted-host host.docker.internal --quiet .", simpleIndexURL),
+		exitCode, output, err := consumerContainer.Exec(ctx, []string{
+			"sh", "-c", fmt.Sprintf("cd /workspace/consumer && pip install --break-system-packages --extra-index-url %s --trusted-host host.docker.internal --quiet .", simpleIndexURL),
 		})
 		assert.NoError(t, err, "Failed to install consumer package")
 		outputStr := testutils.ReadExecOutput(output)
@@ -222,8 +166,8 @@ dependencies = [
 		}
 
 		// Test that both packages work correctly
-		exitCode, output, err = installContainer.Exec(ctx, []string{
-			"sh", "-c", "cd /tmp/consumer && python -c \"from test_package import hello_world; print(hello_world())\"",
+		exitCode, output, err = consumerContainer.Exec(ctx, []string{
+			"sh", "-c", "cd /workspace/consumer && python script.py",
 		})
 		assert.NoError(t, err, "Failed to test installed package")
 		outputStr = testutils.ReadExecOutput(output)

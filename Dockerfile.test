@@ -24,7 +24,8 @@ RUN go install github.com/goreleaser/goreleaser/v2@latest
 
 # Set up Python environment
 RUN python3 --version && \
-    pip3 --version
+    pip3 --version && \
+    pip3 install --break-system-packages build twine
 
 # Set working directory
 WORKDIR /workspace
