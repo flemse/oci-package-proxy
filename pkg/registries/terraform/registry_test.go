@@ -3,6 +3,7 @@ package terraform
 import (
 	"archive/zip"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -73,43 +74,103 @@ func TestTerraformProviderInContainer(t *testing.T) {
 		},
 	}
 
-	s, err := StartProxyServer(t, ctx, packageList)
+	// Generate self-signed certificate for TLS
+	certPEM, _, tlsCert, err := testutils.GenerateSelfSignedCert()
+	require.NoError(t, err, "Failed to generate certificate")
+
+	s, err := StartProxyServerWithTLS(t, ctx, packageList, tlsCert)
 	require.NoError(t, err, "Failed to start proxy server")
 	t.Cleanup(s.Close)
 
-	t.Run("Build", func(t *testing.T) {
+	t.Run("BuildAndUpload", func(t *testing.T) {
 		// Start a Go container with GoReleaser
-		goContainer, err := testutils.StartGoReleaserContainer(ctx)
+		goContainer, err := testutils.StartGoReleaserContainer(t, ctx)
 		require.NoError(t, err, "Failed to start Go container")
 		t.Cleanup(func() { _ = goContainer.Terminate(ctx) })
 
-		assert.NoError(t, goContainer.CopyDirToContainer(ctx, "/Users/dkFleThe/src/flemse/oci-package-proxy/pkg/registries/terraform/sample/", "/", 0755))
+		// Copy the certificate to the container
+		err = goContainer.CopyToContainer(ctx, certPEM, "/usr/local/share/ca-certificates/test-registry.crt", 0644)
+		require.NoError(t, err, "Failed to copy certificate to container")
 
-		exitCode, output, err := goContainer.Exec(ctx, []string{"sh", "-c", "go install github.com/goreleaser/goreleaser/v2@latest"})
+		exitCode, output, err := goContainer.Exec(ctx, []string{"update-ca-certificates"})
 		require.NoError(t, err)
 		outputStr := testutils.ReadExecOutput(output)
-		t.Logf("Go install output:\n%s", outputStr)
-		require.Equal(t, 0, exitCode, "Go install failed")
+		t.Logf("update-ca-certificates output: %s", outputStr)
+		require.Equal(t, 0, exitCode, "install ca-certificates failed")
 
-		exitCode, output, err = goContainer.Exec(ctx, []string{"sh", "-c", "goreleaser build --snapshot --clean"}, tcexec.WithWorkingDir("/sample"))
+		assert.NoError(t, goContainer.CopyDirToContainer(ctx, "./sample", "/", 0755))
+
+		exitCode, output, err = goContainer.Exec(ctx, []string{"sh", "-c", "goreleaser release --snapshot --clean"}, tcexec.WithWorkingDir("/sample"))
 		require.NoError(t, err)
 		outputStr = testutils.ReadExecOutput(output)
 		t.Logf("release output:\n%s", outputStr)
 		require.Equal(t, 0, exitCode, "GoReleaser build failed")
+
+		// List the generated files
+		exitCode, output, err = goContainer.Exec(ctx, []string{"sh", "-c", "ls -la /sample/dist/"})
+		require.NoError(t, err)
+		outputStr = testutils.ReadExecOutput(output)
+		t.Logf("Generated files:\n%s", outputStr)
+
+		// Extract version from SHA256SUMS filename
+		exitCode, output, err = goContainer.Exec(ctx, []string{"sh", "-c", "ls /sample/dist/ | grep SHA256SUMS"})
+		require.NoError(t, err)
+		shasumFile := strings.TrimSpace(testutils.ReadExecOutput(output))
+		require.NotEmpty(t, shasumFile, "SHA256SUMS file not found")
+
+		uploadURL := s.URL + "/terraform/upload"
+		uploadURL = strings.Replace(uploadURL, "127.0.0.1", "host.docker.internal", 1)
+		uploadURL = strings.Replace(uploadURL, "localhost", "host.docker.internal", 1)
+		t.Logf("Upload URL for container: %s", uploadURL)
+
+		t.Logf("Executing upload command")
+		exitCode, output, err = goContainer.Exec(ctx, []string{"sh", "-c", fmt.Sprintf("/sample/release.sh --upload-url %s --dist-path /sample/dist", uploadURL)})
+		require.NoError(t, err)
+		outputStr = testutils.ReadExecOutput(output)
+		t.Logf("Upload output:\n%s", outputStr)
+		require.Equal(t, 0, exitCode, "Upload failed")
+
+		// Verify the upload was successful by checking the response in the output
+		require.Contains(t, outputStr, "success", "Upload response should contain 'success'")
+
+		// Verify we can fetch the provider versions
+		versionsResp, err := s.Client().Get(s.URL + "/v1/providers/test/sample-provider/versions")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = versionsResp.Body.Close() })
+
+		versionsBody, err := io.ReadAll(versionsResp.Body)
+		require.NoError(t, err)
+		t.Logf("Versions response: %s", string(versionsBody))
+
+		var versionsResponse VersionsResponse
+		err = json.Unmarshal(versionsBody, &versionsResponse)
+		require.NoError(t, err)
+		assert.Len(t, versionsResponse.Versions, 1, "Should have at least one version")
 	})
 
 	// Test fetching provider with Terraform
 	t.Run("FetchProviderWithTerraform", func(t *testing.T) {
-		t.Skip("Skipping Terraform integration test - requires pushing provider to registry first")
-
-		tfContainer, err := testutils.StartTerraformTestContainer(ctx)
+		tfContainer, err := testutils.StartTerraformTestContainer(t, ctx)
 		require.NoError(t, err, "Failed to start Terraform container")
-		defer tfContainer.Terminate(ctx)
+		t.Cleanup(func() { _ = tfContainer.Terminate(ctx) })
+
+		// Copy the certificate to the container
+		err = tfContainer.CopyToContainer(ctx, certPEM, "/usr/local/share/ca-certificates/test-registry.crt", 0644)
+		require.NoError(t, err, "Failed to copy certificate to container")
+
+		// Update the CA certificates
+		exitCode, output, err := tfContainer.Exec(ctx, []string{"update-ca-certificates"})
+		require.NoError(t, err)
+		outputStr := testutils.ReadExecOutput(output)
+		t.Logf("update-ca-certificates output: %s", outputStr)
+		require.Equal(t, 0, exitCode, "update-ca-certificates failed")
 
 		// Get the registry URL for container access
 		registryURL := s.URL
 		registryURL = strings.Replace(registryURL, "127.0.0.1", "host.docker.internal", 1)
 		registryURL = strings.Replace(registryURL, "localhost", "host.docker.internal", 1)
+		registryURL = strings.TrimPrefix(registryURL, "https://")
+
 		t.Logf("Registry URL for container: %s", registryURL)
 
 		// Create a Terraform configuration that uses the provider
@@ -117,8 +178,8 @@ func TestTerraformProviderInContainer(t *testing.T) {
 terraform {
   required_providers {
     example = {
-      source  = "%s/test/example"
-      version = "1.0.0"
+      source  = "%s/test/sample-provider"
+      version = "0.0.0-SNAPSHOT-none"
     }
   }
 }
@@ -134,11 +195,11 @@ resource "example_resource" "test" {
 		require.NoError(t, err)
 
 		// Run terraform init
-		exitCode, output, err := tfContainer.Exec(ctx, []string{
+		exitCode, output, err = tfContainer.Exec(ctx, []string{
 			"sh", "-c", "cd /tmp && terraform init",
 		})
 		require.NoError(t, err)
-		outputStr := testutils.ReadExecOutput(output)
+		outputStr = testutils.ReadExecOutput(output)
 		t.Logf("Terraform init output: %s", outputStr)
 		assert.Equal(t, 0, exitCode, "terraform init failed")
 
@@ -233,5 +294,32 @@ func StartProxyServer(t *testing.T, ctx context.Context, pkg *config.PackageList
 	reg.SetupRoutes(mux)
 
 	s := httptest.NewServer(mux)
+	return s, nil
+}
+
+func StartProxyServerWithTLS(t *testing.T, ctx context.Context, pkg *config.PackageList, tlsCert tls.Certificate) (*httptest.Server, error) {
+	t.Helper()
+
+	zotAddr, err := testutils.StartTestContainer(ctx)
+	require.NoError(t, err, "Failed to start Zot container")
+	require.NotEmpty(t, zotAddr, "Zot container address should not be empty")
+	t.Logf("Zot container running at: %s", zotAddr)
+
+	// Configure the registry to use Zot
+	cfg := &config.HostConfig{
+		Host:          zotAddr,
+		AllowInsecure: true,
+		OrgKey:        "",
+	}
+
+	reg := NewRegistry(cfg, pkg)
+	mux := chi.NewRouter()
+	reg.SetupRoutes(mux)
+
+	s := httptest.NewUnstartedServer(mux)
+	s.TLS = &tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+	}
+	s.StartTLS()
 	return s, nil
 }

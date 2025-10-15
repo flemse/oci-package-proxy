@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"path"
+	"strings"
 
 	"github.com/flemse/oci-package-proxy/pkg/config"
 	"github.com/flemse/oci-package-proxy/pkg/core"
@@ -86,6 +87,7 @@ func (re *Registry) SetupRoutes(mux chi.Router) {
 	mux.HandleFunc("/_modules/{namespace}/{name}/{system}/{version}/stream", re.moduleStream)        // New route
 	mux.HandleFunc("/v1/login", re.HandleLogin)
 	mux.HandleFunc("/.well-known/terraform.json", re.HandleWellKnownTerraform)
+	mux.HandleFunc("/terraform/upload", re.HandleUpload)
 }
 
 func (re *Registry) providerShasum(w http.ResponseWriter, r *http.Request) {
@@ -407,4 +409,181 @@ func (re *Registry) packageName(r *http.Request) string {
 		r.PathValue("type"))
 
 	return path.Join(segments...)
+}
+
+// HandleUpload handles the upload of Terraform provider packages
+func (re *Registry) HandleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse multipart form (max 100MB)
+	if err := r.ParseMultipartForm(100 << 20); err != nil {
+		log.Printf("Error parsing multipart form: %v", err)
+		http.Error(w, "Error parsing form", http.StatusBadRequest)
+		return
+	}
+
+	// Get required form values
+	namespace := r.FormValue("namespace")
+	providerType := r.FormValue("type")
+	version := r.FormValue("version")
+
+	if namespace == "" || providerType == "" || version == "" {
+		http.Error(w, "Missing required fields: namespace, type, or version", http.StatusBadRequest)
+		return
+	}
+
+	// Get SHA256SUMS file
+	shasumsFile, _, err := r.FormFile("SHA256SUMS")
+	if err != nil {
+		log.Printf("Error getting SHA256SUMS file: %v", err)
+		http.Error(w, "SHA256SUMS file is required", http.StatusBadRequest)
+		return
+	}
+	defer shasumsFile.Close()
+
+	shasumsContent, err := io.ReadAll(shasumsFile)
+	if err != nil {
+		log.Printf("Error reading SHA256SUMS: %v", err)
+		http.Error(w, "Error reading SHA256SUMS", http.StatusInternalServerError)
+		return
+	}
+
+	// Get optional signature file
+	var signatureContent []byte
+	sigFile, _, err := r.FormFile("SHA256SUMS.sig")
+	if err == nil {
+		defer sigFile.Close()
+		signatureContent, err = io.ReadAll(sigFile)
+		if err != nil {
+			log.Printf("Error reading signature: %v", err)
+			http.Error(w, "Error reading signature", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Parse SHA256SUMS to get expected files
+	expectedFiles := parseSHA256SUMS(string(shasumsContent))
+	if len(expectedFiles) == 0 {
+		http.Error(w, "No files found in SHA256SUMS", http.StatusBadRequest)
+		return
+	}
+
+	// Collect provider files
+	var providerFiles []store.ProviderFile
+	for filename := range expectedFiles {
+		file, header, err := r.FormFile(filename)
+		if err != nil {
+			log.Printf("Missing required file: %s", filename)
+			http.Error(w, fmt.Sprintf("Missing required file: %s", filename), http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		content, err := io.ReadAll(file)
+		if err != nil {
+			log.Printf("Error reading file %s: %v", filename, err)
+			http.Error(w, fmt.Sprintf("Error reading file: %s", filename), http.StatusInternalServerError)
+			return
+		}
+
+		// Verify checksum
+		actualChecksum := fmt.Sprintf("%x", store.SHA256Sum(content))
+		if actualChecksum != expectedFiles[filename] {
+			log.Printf("Checksum mismatch for %s: expected %s, got %s", filename, expectedFiles[filename], actualChecksum)
+			http.Error(w, fmt.Sprintf("Checksum mismatch for file: %s", filename), http.StatusBadRequest)
+			return
+		}
+
+		// Extract OS and architecture from filename
+		// Expected format: provider_version_os_arch.zip
+		osName, arch := extractPlatformFromFilename(header.Filename)
+
+		providerFiles = append(providerFiles, store.ProviderFile{
+			Name:    header.Filename,
+			Content: content,
+			OS:      osName,
+			Arch:    arch,
+		})
+	}
+
+	// Create OCI store
+	packageName := path.Join(namespace, providerType)
+	if re.OrgKey != "" {
+		packageName = path.Join(re.OrgKey, packageName)
+	}
+
+	creds := re.creds.FromRequest(r)
+	ociStore, err := store.NewStore(re.HostConfig, packageName, creds)
+	if err != nil {
+		log.Printf("Error creating OCI store: %v", err)
+		http.Error(w, "Error creating OCI store", http.StatusInternalServerError)
+		return
+	}
+
+	// Push provider bundle to OCI registry
+	tag := "v" + version
+	if err := ociStore.PushProviderBundle(r.Context(), tag, providerFiles, shasumsContent, signatureContent); err != nil {
+		log.Printf("Error pushing provider bundle: %v", err)
+		http.Error(w, "Error pushing provider bundle", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":    "success",
+		"message":   "Provider uploaded successfully",
+		"namespace": namespace,
+		"type":      providerType,
+		"version":   version,
+		"tag":       tag,
+	})
+}
+
+// parseSHA256SUMS parses the SHA256SUMS file and returns a map of filename to checksum
+func parseSHA256SUMS(content string) map[string]string {
+	files := make(map[string]string)
+	lines := strings.Split(content, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Format: checksum  filename
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			checksum := parts[0]
+			filename := parts[1]
+
+			// Only include .zip files (skip .sbom.json and manifest.json files for now)
+			if strings.HasSuffix(filename, ".zip") {
+				files[filename] = checksum
+			}
+		}
+	}
+
+	return files
+}
+
+// extractPlatformFromFilename extracts OS and architecture from filename
+// Expected format: name_version_os_arch.zip
+func extractPlatformFromFilename(filename string) (string, string) {
+	// Remove .zip extension
+	name := strings.TrimSuffix(filename, ".zip")
+
+	// Split by underscore
+	parts := strings.Split(name, "_")
+
+	if len(parts) >= 2 {
+		// Last part is architecture, second to last is OS
+		arch := parts[len(parts)-1]
+		osName := parts[len(parts)-2]
+		return osName, arch
+	}
+
+	return "", ""
 }

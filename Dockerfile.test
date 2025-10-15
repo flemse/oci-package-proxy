@@ -1,0 +1,33 @@
+# Multi-purpose test container with Go, Terraform, and Python
+FROM golang:1.25.1-alpine
+
+# Install system dependencies
+RUN apk add --no-cache \
+    ca-certificates \
+    git \
+    curl \
+    unzip \
+    python3 \
+    py3-pip \
+    python3-dev \
+    build-base
+
+# Install Terraform
+RUN curl -Lo /tmp/terraform.zip https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip && \
+    unzip /tmp/terraform.zip -d /usr/local/bin/ && \
+    rm /tmp/terraform.zip && \
+    terraform --version
+
+# Install GoReleaser
+RUN go install github.com/goreleaser/goreleaser/v2@latest
+
+# Set up Python environment
+RUN python3 --version && \
+    pip3 --version
+
+# Set working directory
+WORKDIR /workspace
+
+# Keep container running
+CMD ["sleep", "infinity"]
+

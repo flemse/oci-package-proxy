@@ -3,13 +3,74 @@ package testutils
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"testing"
+	"time"
 
+	"github.com/docker/docker/api/types"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+var (
+	testImageBuilt     bool
+	testImageBuildLock sync.Mutex
+)
+
+// EnsureTestImageBuilt builds the unified test image if it hasn't been built yet
+func EnsureTestImageBuilt(ctx context.Context) error {
+	testImageBuildLock.Lock()
+	defer testImageBuildLock.Unlock()
+
+	if testImageBuilt {
+		return nil
+	}
+
+	// Get the project root directory (assuming we're in pkg/testutils)
+	projectRoot, err := filepath.Abs("../../..")
+	if err != nil {
+		return fmt.Errorf("failed to get project root: %w", err)
+	}
+
+	// Build the test image using testcontainers
+	req := testcontainers.ContainerRequest{
+		FromDockerfile: testcontainers.FromDockerfile{
+			BuildOptionsModifier: func(options *types.ImageBuildOptions) {
+				options.Tags = append(options.Tags, "oci-package-proxy-test:latest")
+			},
+			Context:        projectRoot,
+			KeepImage:      true,
+			Dockerfile:     "Dockerfile.test",
+			BuildLogWriter: os.Stdout,
+		},
+	}
+
+	// Build the image (GenericContainer with Started: false will just build)
+	_, err = testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          false,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to build test image: %w", err)
+	}
+
+	testImageBuilt = true
+	return nil
+}
 
 func StartTestContainer(ctx context.Context) (string, error) {
 	req := testcontainers.ContainerRequest{
@@ -63,8 +124,12 @@ func ReadExecOutput(reader io.Reader) string {
 }
 
 func StartPythonTestContainer(ctx context.Context) (testcontainers.Container, error) {
+	if err := EnsureTestImageBuilt(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ensure test image is built: %w", err)
+	}
+
 	req := testcontainers.ContainerRequest{
-		Image:      "python:3.11-slim",
+		Image:      "oci-package-proxy-test:latest",
 		WaitingFor: wait.ForLog(""),
 		Cmd:        []string{"sleep", "infinity"},
 	}
@@ -75,28 +140,107 @@ func StartPythonTestContainer(ctx context.Context) (testcontainers.Container, er
 	})
 }
 
-func StartTerraformTestContainer(ctx context.Context) (testcontainers.Container, error) {
+func StartTerraformTestContainer(t *testing.T, ctx context.Context) (testcontainers.Container, error) {
+	t.Helper()
+
+	if err := EnsureTestImageBuilt(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ensure test image is built: %w", err)
+	}
+
 	req := testcontainers.ContainerRequest{
-		Image:      "hashicorp/terraform:latest",
+		Image:      "oci-package-proxy-test:latest",
 		WaitingFor: wait.ForLog(""),
 		Cmd:        []string{"sleep", "infinity"},
 	}
 
-	return testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
 		Started:          true,
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	return container, nil
 }
 
-func StartGoReleaserContainer(ctx context.Context) (testcontainers.Container, error) {
+func StartGoReleaserContainer(t *testing.T, ctx context.Context) (testcontainers.Container, error) {
+	t.Helper()
+
+	if err := EnsureTestImageBuilt(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ensure test image is built: %w", err)
+	}
+
 	req := testcontainers.ContainerRequest{
-		Image:      "golang:1.25.1",
+		Image:      "oci-package-proxy-test:latest",
 		WaitingFor: wait.ForLog(""),
 		Cmd:        []string{"sleep", "infinity"},
 	}
 
-	return testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
 		Started:          true,
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	return container, nil
+}
+
+// GenerateSelfSignedCert generates a self-signed certificate for testing
+// Returns the certificate PEM, private key PEM, and tls.Certificate
+func GenerateSelfSignedCert() (certPEM, keyPEM []byte, tlsCert tls.Certificate, err error) {
+	// Generate a private key
+	priv, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		return nil, nil, tls.Certificate{}, fmt.Errorf("failed to generate private key: %w", err)
+	}
+
+	// Create a certificate template
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"Test Organization"},
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(365 * 24 * time.Hour), // 1 year validity
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{"localhost", "host.docker.internal"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	// Self-sign the certificate
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return nil, nil, tls.Certificate{}, fmt.Errorf("failed to create certificate: %w", err)
+	}
+
+	// Encode certificate to PEM
+	certPEMBuffer := new(bytes.Buffer)
+	if err := pem.Encode(certPEMBuffer, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+		return nil, nil, tls.Certificate{}, fmt.Errorf("failed to encode certificate: %w", err)
+	}
+	certPEM = certPEMBuffer.Bytes()
+
+	// Encode private key to PEM
+	privBytes, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		return nil, nil, tls.Certificate{}, fmt.Errorf("failed to marshal private key: %w", err)
+	}
+	keyPEMBuffer := new(bytes.Buffer)
+	if err := pem.Encode(keyPEMBuffer, &pem.Block{Type: "EC PRIVATE KEY", Bytes: privBytes}); err != nil {
+		return nil, nil, tls.Certificate{}, fmt.Errorf("failed to encode private key: %w", err)
+	}
+	keyPEM = keyPEMBuffer.Bytes()
+
+	// Create tls.Certificate
+	tlsCert, err = tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, nil, tls.Certificate{}, fmt.Errorf("failed to create tls certificate: %w", err)
+	}
+
+	return certPEM, keyPEM, tlsCert, nil
 }

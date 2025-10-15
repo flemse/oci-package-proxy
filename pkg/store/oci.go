@@ -179,6 +179,23 @@ func (s *Store) getIndex(ctx context.Context, ref string) (*ocispec.Index, error
 	if err := json.NewDecoder(indexReader).Decode(&index); err != nil {
 		return nil, fmt.Errorf("failed to decode index: %w", err)
 	}
+
+	// If this is an outer index with a single manifest that's also an index,
+	// fetch and return the inner index instead
+	if len(index.Manifests) == 1 && index.Manifests[0].MediaType == ocispec.MediaTypeImageIndex {
+		innerIndexReader, err := s.repo.Fetch(ctx, index.Manifests[0])
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch inner index: %w", err)
+		}
+		defer innerIndexReader.Close()
+
+		var innerIndex ocispec.Index
+		if err := json.NewDecoder(innerIndexReader).Decode(&innerIndex); err != nil {
+			return nil, fmt.Errorf("failed to decode inner index: %w", err)
+		}
+		return &innerIndex, nil
+	}
+
 	return &index, nil
 }
 
@@ -302,4 +319,185 @@ func (s *Store) PushFile(ctx context.Context, fileContent io.Reader, filename, t
 	_ = base64.StdEncoding // Keep import
 
 	return nil
+}
+
+// ProviderFile represents a file to be uploaded as part of a provider bundle
+type ProviderFile struct {
+	Name    string
+	Content []byte
+	OS      string
+	Arch    string
+}
+
+// PushProviderBundle uploads a complete Terraform provider bundle to the OCI registry
+func (s *Store) PushProviderBundle(ctx context.Context, tag string, files []ProviderFile, shasums []byte, signature []byte) error {
+	innerImageIndex := ocispec.Index{
+		Versioned:   specs.Versioned{SchemaVersion: 2},
+		MediaType:   ocispec.MediaTypeImageIndex,
+		Annotations: map[string]string{},
+	}
+
+	// Store shasums if provided
+	if len(shasums) > 0 {
+		encodedShasum := base64.StdEncoding.EncodeToString(shasums)
+		innerImageIndex.Annotations[ShasumAnnotation] = encodedShasum
+	}
+
+	// Store signature if provided
+	if len(signature) > 0 {
+		encodedSig := base64.StdEncoding.EncodeToString(signature)
+		innerImageIndex.Annotations[ShasumSignatureAnnotation] = encodedSig
+	}
+
+	// Process each file
+	for _, file := range files {
+		// Calculate file digest
+		fileDigest := digest.FromBytes(file.Content)
+
+		// Create blob descriptor
+		blobDesc := ocispec.Descriptor{
+			MediaType:    ocispec.MediaTypeImageLayerGzip,
+			Digest:       fileDigest,
+			ArtifactType: ArtifactType,
+			Platform: &ocispec.Platform{
+				OS:           file.OS,
+				Architecture: file.Arch,
+			},
+			Size: int64(len(file.Content)),
+		}
+
+		// Push the blob
+		if err := s.repo.Push(ctx, blobDesc, strings.NewReader(string(file.Content))); err != nil {
+			return fmt.Errorf("failed to push blob for %s: %w", file.Name, err)
+		}
+
+		// Create config with platform info
+		config := map[string]string{
+			"os":           file.OS,
+			"architecture": file.Arch,
+		}
+		configData, err := json.Marshal(config)
+		if err != nil {
+			return fmt.Errorf("failed to marshal config for %s: %w", file.Name, err)
+		}
+
+		configDigest := digest.FromBytes(configData)
+		configDesc := ocispec.Descriptor{
+			MediaType: ocispec.MediaTypeImageConfig,
+			Digest:    configDigest,
+			Size:      int64(len(configData)),
+		}
+
+		// Push the config
+		if err := s.repo.Push(ctx, configDesc, strings.NewReader(string(configData))); err != nil {
+			return fmt.Errorf("failed to push config for %s: %w", file.Name, err)
+		}
+
+		// Create annotations for the manifest
+		annotations := map[string]string{
+			FileNameAnnotation:   file.Name,
+			FileDigestAnnotation: fileDigest.Encoded(),
+		}
+
+		// Create manifest
+		manifest := ocispec.Manifest{
+			Versioned:    specs.Versioned{SchemaVersion: 2},
+			MediaType:    ocispec.MediaTypeImageManifest,
+			ArtifactType: ArtifactType,
+			Config:       configDesc,
+			Layers: []ocispec.Descriptor{
+				blobDesc,
+			},
+			Annotations: annotations,
+		}
+
+		manifestData, err := json.Marshal(manifest)
+		if err != nil {
+			return fmt.Errorf("failed to marshal manifest for %s: %w", file.Name, err)
+		}
+
+		manifestDigest := digest.FromBytes(manifestData)
+		manifestDesc := ocispec.Descriptor{
+			MediaType:    ocispec.MediaTypeImageManifest,
+			Digest:       manifestDigest,
+			Size:         int64(len(manifestData)),
+			Annotations:  annotations,
+			ArtifactType: ArtifactType,
+			Platform: &ocispec.Platform{
+				OS:           file.OS,
+				Architecture: file.Arch,
+			},
+		}
+
+		// Set platform info if available
+		if file.OS != "" || file.Arch != "" {
+			manifestDesc.Platform = &ocispec.Platform{
+				OS:           file.OS,
+				Architecture: file.Arch,
+			}
+		}
+
+		// Push the manifest
+		if err := s.repo.Push(ctx, manifestDesc, strings.NewReader(string(manifestData))); err != nil {
+			return fmt.Errorf("failed to push manifest for %s: %w", file.Name, err)
+		}
+
+		// Add to inner index
+		innerImageIndex.Manifests = append(innerImageIndex.Manifests, manifestDesc)
+	}
+
+	// Marshal inner index
+	innerIndexData, err := json.Marshal(innerImageIndex)
+	if err != nil {
+		return fmt.Errorf("failed to marshal inner image index: %w", err)
+	}
+
+	innerIndexDigest := digest.FromBytes(innerIndexData)
+	innerIndexDesc := ocispec.Descriptor{
+		MediaType:    ocispec.MediaTypeImageIndex,
+		Digest:       innerIndexDigest,
+		Size:         int64(len(innerIndexData)),
+		ArtifactType: ArtifactType,
+		Annotations: map[string]string{
+			ocispec.AnnotationRefName: tag,
+		},
+	}
+
+	// Push inner index
+	if err := s.repo.Push(ctx, innerIndexDesc, strings.NewReader(string(innerIndexData))); err != nil {
+		return fmt.Errorf("failed to push inner index: %w", err)
+	}
+
+	// Create outer index with the inner index as a manifest
+	outerImageIndex := ocispec.Index{
+		Versioned:   specs.Versioned{SchemaVersion: 2},
+		MediaType:   ocispec.MediaTypeImageIndex,
+		Annotations: map[string]string{},
+		Manifests:   []ocispec.Descriptor{innerIndexDesc},
+	}
+
+	// Marshal outer index
+	outerIndexData, err := json.Marshal(outerImageIndex)
+	if err != nil {
+		return fmt.Errorf("failed to marshal outer image index: %w", err)
+	}
+
+	outerIndexDesc := content.NewDescriptorFromBytes(ocispec.MediaTypeImageIndex, outerIndexData)
+
+	// Push outer index
+	if err := s.repo.Push(ctx, outerIndexDesc, strings.NewReader(string(outerIndexData))); err != nil {
+		return fmt.Errorf("failed to push outer index: %w", err)
+	}
+
+	// Tag the outer index
+	if err := s.repo.Tag(ctx, outerIndexDesc, tag); err != nil {
+		return fmt.Errorf("failed to tag index: %w", err)
+	}
+
+	return nil
+}
+
+// SHA256Sum calculates the SHA256 checksum of the given data
+func SHA256Sum(data []byte) [32]byte {
+	return sha256.Sum256(data)
 }
