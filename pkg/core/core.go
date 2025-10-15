@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/flemse/oci-package-proxy/pkg/registries/terraform/auth"
+	"github.com/flemse/oci-package-proxy/pkg/registry/terraform/auth"
 	orasauth "oras.land/oras-go/v2/registry/remote/auth"
 )
 

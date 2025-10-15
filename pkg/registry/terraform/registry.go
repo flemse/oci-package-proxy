@@ -12,7 +12,7 @@ import (
 
 	"github.com/flemse/oci-package-proxy/pkg/config"
 	"github.com/flemse/oci-package-proxy/pkg/core"
-	"github.com/flemse/oci-package-proxy/pkg/registries/terraform/auth"
+	"github.com/flemse/oci-package-proxy/pkg/registry/terraform/auth"
 	"github.com/flemse/oci-package-proxy/pkg/store"
 	"github.com/go-chi/chi/v5"
 )

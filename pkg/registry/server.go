@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/flemse/oci-package-proxy/pkg/config"
-	"github.com/flemse/oci-package-proxy/pkg/registries/python"
-	"github.com/flemse/oci-package-proxy/pkg/registries/terraform"
+	"github.com/flemse/oci-package-proxy/pkg/registry/python"
+	"github.com/flemse/oci-package-proxy/pkg/registry/terraform"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
