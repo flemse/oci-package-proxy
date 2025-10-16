@@ -2,124 +2,86 @@ package store
 
 import (
 	"context"
-	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/flemse/oci-package-proxy/pkg/config"
+	"github.com/flemse/oci-package-proxy/pkg/testutils"
 	"github.com/stretchr/testify/assert"
-	"oras.land/oras-go/v2"
-	"oras.land/oras-go/v2/content/oci"
+	"github.com/stretchr/testify/require"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
 )
 
-func TestFetchTags(t *testing.T) {
-	ctx := context.Background()
-	host := "localhost:5001"
-	repoName := "appmgmt"
-	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", host, repoName))
-	repo.PlainHTTP = true
-	assert.NoError(t, err)
-	expectedTagList := []string{"v1"}
-	var actualTagList []string
+func TestOCIStore(t *testing.T) {
+	ctx := t.Context()
+	zotAddr, err := testutils.StartTestContainer(ctx)
+	require.NoError(t, err, "Failed to start Zot container")
+	require.NotEmpty(t, zotAddr, "Zot container address should not be empty")
+	t.Logf("Zot container running at: %s", zotAddr)
+	cfg := &config.HostConfig{
+		AllowInsecure: true,
+		Host:          strings.TrimPrefix(zotAddr, "http://"),
+		OrgKey:        "test-org",
+	}
 
-	err = repo.Tags(ctx, "", func(tags []string) error {
-		actualTagList = append(actualTagList, tags...)
-		return nil
+	s, err := NewStore(cfg, "test-project", nil)
+	assert.NoError(t, err)
+
+	files := []struct {
+		file    string
+		content string
+		tag     string
+	}{
+		{
+			file:    "file1.txt",
+			content: "value1",
+			tag:     "v1",
+		},
+		{
+			file:    "file2.txt",
+			content: "value2",
+			tag:     "v2",
+		},
+	}
+
+	for _, f := range files {
+		err = s.PushFile(t.Context(), strings.NewReader(f.content), f.file, f.tag)
+		assert.NoError(t, err)
+	}
+
+	t.Run("GetShasum", func(t *testing.T) {
+		t.Skip("needs to use other push method for shasum to be set")
+		shasums, err := s.Shasums(ctx, "v1")
+		assert.NoError(t, err)
+		assert.NotEmpty(t, shasums)
 	})
-	assert.NoError(t, err)
-	assert.Equal(t, expectedTagList, actualTagList)
-}
 
-func TestManifest(t *testing.T) {
-	ctx := context.Background()
-	host := "localhost:5001"
-	repoName := "appmgmt"
-	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", host, repoName))
-	repo.PlainHTTP = true
-	assert.NoError(t, err)
+	t.Run("GetDownloadUrls", func(t *testing.T) {
+		urls, err := s.DownloadUrls(ctx, "v1")
+		assert.NoError(t, err)
+		assert.NotEmpty(t, urls)
+		resp, err := http.Get(urls["file1.txt"])
+		assert.NoError(t, err)
+		t.Cleanup(func() { _ = resp.Body.Close() })
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		body, err := io.ReadAll(resp.Body)
+		assert.NoError(t, err)
+		assert.Equal(t, "value1", string(body))
+	})
 
-	desc, err := repo.Resolve(ctx, "appmgmt:v1")
-	assert.NoError(t, err)
-	assert.NotNil(t, desc)
-}
-
-func TestShasumsFromIndex(t *testing.T) {
-	ctx := context.Background()
-	cfg := &config.HostConfig{
-		AllowInsecure: true,
-		Host:          "localhost:5001",
-		OrgKey:        "",
-	}
-	oci, err := NewStore(cfg, "appmgmt", nil)
-	assert.NoError(t, err)
-
-	shasums, err := oci.Shasums(ctx, "v1")
-	assert.NoError(t, err)
-	assert.NotEmpty(t, shasums)
-}
-
-func TestDownloadUrlsFromIndex(t *testing.T) {
-	ctx := context.Background()
-	cfg := &config.HostConfig{
-		AllowInsecure: true,
-		Host:          "localhost:5001",
-		OrgKey:        "appmgmt",
-	}
-
-	oci, err := NewStore(cfg, "appmgmt", nil)
-	assert.NoError(t, err)
-
-	urls, err := oci.DownloadUrls(ctx, "v1")
-	assert.NoError(t, err)
-	assert.NotEmpty(t, urls)
-}
-
-func TestGetOciStore(t *testing.T) {
-	store, err := oci.New(t.TempDir())
-	assert.NoError(t, err)
-	ctx := context.Background()
-	cfg := &config.HostConfig{
-		AllowInsecure: true,
-		Host:          "localhost:5001",
-		OrgKey:        "",
-	}
-
-	repoName := "appmgmt"
-
-	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", cfg.Host, repoName))
-	repo.PlainHTTP = true
-	assert.NoError(t, err)
-	// 2. Copy from the remote repository to the OCI layout store
-	tag := "v1"
-	manifestDescriptor, err := oras.Copy(ctx, repo, tag, store, tag, oras.DefaultCopyOptions)
-	assert.NoError(t, err)
-	assert.NotNil(t, manifestDescriptor)
-}
-
-func TestGetVersions(t *testing.T) {
-	ctx := context.Background()
-
-	cfg := &config.HostConfig{
-		AllowInsecure: true,
-		Host:          "localhost:5001",
-		OrgKey:        "",
-	}
-
-	repoName := "novus/applicationmanagement"
-	repo, err := remote.NewRepository(fmt.Sprintf("%s/%s", cfg.Host, repoName))
-	repo.PlainHTTP = true
-	assert.NoError(t, err)
-	oci, err := NewStore(cfg, repoName, nil)
-	assert.NoError(t, err)
-
-	versions, err := oci.Versions(ctx)
-	assert.NoError(t, err)
-	assert.NotEmpty(t, versions)
+	t.Run("GetVersions", func(t *testing.T) {
+		versions, err := s.Versions(ctx)
+		assert.NoError(t, err)
+		assert.EqualValues(t, []string{"1", "2"}, versions) // TODO: consider if we should keep "v" and only strip it in terraform cases
+	})
 }
 
 func TestGetPackages_GHCR_Success(t *testing.T) {
+	t.Skip("skipping test that requires GHCR access token")
 	ctx := context.Background()
 	host := "ghcr.io/lego"
 	//repoName := "novus/applicationmanagement"
